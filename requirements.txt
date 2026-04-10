@@ -1,0 +1,23 @@
+# GUI
+PyQt6>=6.4.0
+
+# Обработка документов
+python-docx>=0.8.11
+PyMuPDF>=1.21.0
+
+# OCR для сканов
+easyocr>=1.7.0
+
+# Семантический поиск
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.4
+
+# NER
+transformers>=4.30.0
+torch>=2.0.0
+
+# Утилиты
+tqdm>=4.65.0
+
+# Тестирование
+pytest>=7.0.0
