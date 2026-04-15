@@ -1,50 +1,32 @@
 #!/usr/bin/env python3
 """
 Тестовое окно для проверки модулей:
-- text_extractor.py (загрузка документов)
-- preprocessor.py (очистка и разбиение на чанки)
-
-Запуск:
-    python test_gui.py
+- text_extractor.py, preprocessor.py, indexer.py, semantic_search.py
+Запуск: python test_gui.py
 """
 
 import sys
 from pathlib import Path
 
-# Добавляем корень проекта в path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from PyQt6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QPushButton,
-    QTextEdit,
-    QFileDialog,
-    QLabel,
-    QProgressBar,
-    QMessageBox,
-    QListWidget,
-    QListWidgetItem,
-    QSplitter,
-    QTabWidget,
-    QComboBox,
-    QSpinBox,
-    QGroupBox,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QTextEdit, QFileDialog, QLabel, QProgressBar,
+    QMessageBox, QListWidget, QListWidgetItem, QTabWidget,
+    QComboBox, QSpinBox, QGroupBox, QLineEdit,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 import html as html_module
 
 from src.text_extractor import DocumentLoader
 from src.preprocessor import TextPreprocessor
+from src.indexer import IndexBuilder, VectorIndex
+from src.semantic_search import SemanticSearch
 
 
 class WorkerThread(QThread):
-    """Поток для длительных операций — использует только сигналы, не callback'и"""
-    progress = pyqtSignal(int, int, str)  # current, total, filename
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
@@ -56,7 +38,6 @@ class WorkerThread(QThread):
 
     def run(self):
         try:
-            # Если операция поддерживает progress_callback, подставляем свой
             result = self.operation(*self.args, **self.kwargs)
             self.finished.emit(result)
         except Exception as e:
@@ -64,759 +45,476 @@ class WorkerThread(QThread):
 
 
 class TestWindow(QMainWindow):
-    """Тестовое окно для проверки загрузки документов и предобработки"""
-
     def __init__(self):
         super().__init__()
         self.loader = DocumentLoader()
         self.file_paths = []
         self.extracted_texts = {}
-        
-        # Препроцессор и чанки
         self.preprocessor = TextPreprocessor()
-        self.chunks = {}  # {file_path: [TextChunk, ...]}
-        
+        self.chunks = {}
+        self.index = None
+        self.index_builder = None
+        self.index_ready = False
+        self.searcher = None
         self._init_ui()
         self._setup_styles()
 
     def _init_ui(self):
-        """Инициализация интерфейса"""
-        self.setMinimumSize(1200, 700)
+        self.setMinimumSize(1300, 750)
+        self.setWindowTitle("DocInsight — Тест")
 
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(15, 15, 15, 15)
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QHBoxLayout(central)
+        root.setSpacing(0)
+        root.setContentsMargins(0, 0, 0, 0)
 
-        # Заголовок (по центру)
-        title = QLabel("🧪 Тест DocInsight — Загрузка + Предобработка")
-        title.setObjectName("title")
-        title.setFont(QFont("Arial", 18, QFont.Weight.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        main_layout.addWidget(title)
-
-        # Разделитель
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_layout.addWidget(splitter)
-
-        # ===== ЛЕВАЯ ПАНЕЛЬ =====
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-
-        # --- СЕКЦИЯ: ЗАГРУЗКА ФАЙЛОВ ---
-        load_group = QGroupBox("📁 Загрузка документов")
-        load_layout = QVBoxLayout(load_group)
+        # SIDEBAR
+        sidebar = QWidget()
+        sidebar.setFixedWidth(300)
+        sb = QVBoxLayout(sidebar)
+        sb.setContentsMargins(10, 10, 10, 10)
+        sb.setSpacing(10)
 
         self.btn_load = QPushButton("📁 Выбрать файлы")
-        self.btn_load.setFixedHeight(45)
-        self.btn_load.setStyleSheet("font-size: 14px;")
+        self.btn_load.setFixedHeight(40)
         self.btn_load.clicked.connect(self._load_files)
-        load_layout.addWidget(self.btn_load)
+        sb.addWidget(self.btn_load)
 
-        self.lbl_file_count = QLabel("Загружено файлов: 0")
-        self.lbl_file_count.setObjectName("file_count")
-        self.lbl_file_count.setFont(QFont("Arial", 11))
-        load_layout.addWidget(self.lbl_file_count)
+        self.lbl_count = QLabel("Загружено: 0")
+        self.lbl_count.setStyleSheet("color: #888; font-size: 12px;")
+        sb.addWidget(self.lbl_count)
 
         self.file_list = QListWidget()
-        self.file_list.setAlternatingRowColors(False)
-        load_layout.addWidget(self.file_list)
-
-        # Прогресс бар
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        load_layout.addWidget(self.progress)
-
-        # Кнопки извлечения
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(10)
+        self.file_list.setMinimumHeight(120)
+        self.file_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sb.addWidget(self.file_list)
 
         self.btn_extract = QPushButton("⚙️ Извлечь текст")
-        self.btn_extract.setFixedHeight(40)
+        self.btn_extract.setFixedHeight(38)
         self.btn_extract.clicked.connect(self._extract_all)
         self.btn_extract.setEnabled(False)
-        btn_layout.addWidget(self.btn_extract)
+        sb.addWidget(self.btn_extract)
 
-        load_layout.addLayout(btn_layout)
-        left_layout.addWidget(load_group)
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        sb.addWidget(self.progress)
 
-        # --- СЕКЦИЯ: ПРЕДОБРАБОТКА ---
-        preprocess_group = QGroupBox("🔧 Предобработка текста")
-        preprocess_layout = QVBoxLayout(preprocess_group)
+        # Предобработка
+        g1 = QGroupBox("Предобработка")
+        g1l = QVBoxLayout(g1)
+        g1l.setContentsMargins(8, 8, 8, 8)
+        g1l.setSpacing(6)
 
-        # Размер чанка
-        size_layout = QHBoxLayout()
-        size_layout.addWidget(QLabel("Размер чанка:"))
-        self.chunk_size_spin = QSpinBox()
-        self.chunk_size_spin.setRange(200, 2000)
-        self.chunk_size_spin.setValue(500)
-        self.chunk_size_spin.setSingleStep(50)
-        size_layout.addWidget(self.chunk_size_spin)
-        size_layout.addWidget(QLabel("симв."))
-        preprocess_layout.addLayout(size_layout)
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("Размер:"))
+        self.spin_size = QSpinBox()
+        self.spin_size.setRange(200, 2000)
+        self.spin_size.setValue(500)
+        self.spin_size.setSingleStep(50)
+        r1.addWidget(self.spin_size)
+        r1.addWidget(QLabel("симв."))
+        g1l.addLayout(r1)
 
-        # Overlap
-        overlap_layout = QHBoxLayout()
-        overlap_layout.addWidget(QLabel("Overlap:"))
-        self.chunk_overlap_spin = QSpinBox()
-        self.chunk_overlap_spin.setRange(0, 5)
-        self.chunk_overlap_spin.setValue(2)
-        self.chunk_overlap_spin.setSingleStep(1)
-        overlap_layout.addWidget(self.chunk_overlap_spin)
-        overlap_layout.addWidget(QLabel("предл."))
-        preprocess_layout.addLayout(overlap_layout)
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("Overlap:"))
+        self.spin_overlap = QSpinBox()
+        self.spin_overlap.setRange(0, 5)
+        self.spin_overlap.setValue(2)
+        r2.addWidget(self.spin_overlap)
+        r2.addWidget(QLabel("предл."))
+        g1l.addLayout(r2)
 
-        # Кнопка предобработки
         self.btn_preprocess = QPushButton("🔪 Предобработать")
-        self.btn_preprocess.setFixedHeight(40)
+        self.btn_preprocess.setFixedHeight(36)
         self.btn_preprocess.clicked.connect(self._preprocess_all)
         self.btn_preprocess.setEnabled(False)
-        preprocess_layout.addWidget(self.btn_preprocess)
+        g1l.addWidget(self.btn_preprocess)
+        sb.addWidget(g1)
 
-        left_layout.addWidget(preprocess_group)
+        # Поиск
+        g2 = QGroupBox("Семантический поиск")
+        g2l = QVBoxLayout(g2)
+        g2l.setContentsMargins(8, 8, 8, 8)
+        g2l.setSpacing(6)
 
-        # Кнопка очистки
-        self.btn_clear = QPushButton("🗑️ Очистить всё")
-        self.btn_clear.setFixedHeight(40)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Запрос...")
+        self.search_input.setFixedHeight(36)
+        self.search_input.returnPressed.connect(self._do_search)
+        g2l.addWidget(self.search_input)
+
+        r3 = QHBoxLayout()
+        r3.addWidget(QLabel("Top-K:"))
+        self.spin_topk = QSpinBox()
+        self.spin_topk.setRange(1, 50)
+        self.spin_topk.setValue(5)
+        r3.addWidget(self.spin_topk)
+        r3.addStretch()
+        g2l.addLayout(r3)
+
+        self.btn_search = QPushButton("🔎 Найти")
+        self.btn_search.setFixedHeight(36)
+        self.btn_search.clicked.connect(self._do_search)
+        self.btn_search.setEnabled(False)
+        g2l.addWidget(self.btn_search)
+        sb.addWidget(g2)
+
+        self.btn_clear = QPushButton("🗑️ Очистить")
+        self.btn_clear.setFixedHeight(36)
         self.btn_clear.clicked.connect(self._clear)
-        left_layout.addWidget(self.btn_clear)
+        sb.addWidget(self.btn_clear)
+        sb.addStretch()
 
-        # ===== ПРАВАЯ ПАНЕЛЬ =====
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(sidebar)
 
-        # Переключатель файлов
-        file_selector_layout = QHBoxLayout()
-        file_selector_layout.addWidget(QLabel("Файл:"))
+        # MAIN AREA
+        main = QWidget()
+        ml = QVBoxLayout(main)
+        ml.setSpacing(6)
+        ml.setContentsMargins(10, 10, 10, 10)
+
+        title = QLabel("🧪 DocInsight")
+        title.setObjectName("title")
+        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        ml.addWidget(title)
+
+        sel = QHBoxLayout()
+        sel.addWidget(QLabel("Файл:"))
         self.file_selector = QComboBox()
-        self.file_selector.setFixedWidth(400)
         self.file_selector.currentIndexChanged.connect(self._on_file_selected)
-        file_selector_layout.addWidget(self.file_selector)
-        file_selector_layout.addStretch()
-        right_layout.addLayout(file_selector_layout)
+        sel.addWidget(self.file_selector)
+        sel.addStretch()
+        ml.addLayout(sel)
 
-        # Вкладки
         self.tabs = QTabWidget()
 
-        # Вкладка 1: Результат (сырой текст)
         self.txt_result = QTextEdit()
         self.txt_result.setReadOnly(True)
-        self.txt_result.setFont(QFont("Menlo", 10))
-        self.txt_result.setPlaceholderText("Здесь появится полный текст извлечённых документов...")
-        self.txt_result.document().setMaximumBlockCount(1000000)
-        self.tabs.addTab(self.txt_result, "📄 Сырой текст")
+        self.txt_result.setFont(QFont("Consolas", 10))
+        self.txt_result.setPlaceholderText("Текст документа...")
+        self.tabs.addTab(self.txt_result, "📄 Текст")
 
-        # Вкладка 2: Чанки
         self.txt_chunks = QTextEdit()
         self.txt_chunks.setReadOnly(True)
-        self.txt_chunks.setFont(QFont("Menlo", 10))
-        self.txt_chunks.setPlaceholderText("Здесь появятся чанки после предобработки...")
-        self.txt_chunks.document().setMaximumBlockCount(1000000)
+        self.txt_chunks.setFont(QFont("Consolas", 10))
+        self.txt_chunks.setPlaceholderText("Чанки...")
         self.tabs.addTab(self.txt_chunks, "🔪 Чанки")
 
-        # Вкладка 3: Статистика
+        self.txt_search_results = QTextEdit()
+        self.txt_search_results.setReadOnly(True)
+        self.txt_search_results.setFont(QFont("Consolas", 10))
+        self.txt_search_results.setPlaceholderText("Результаты поиска...")
+        self.tabs.addTab(self.txt_search_results, "🔎 Поиск")
+
         self.txt_stats = QTextEdit()
         self.txt_stats.setReadOnly(True)
-        self.txt_stats.setFont(QFont("Menlo", 10))
-        self.txt_stats.setPlaceholderText("Статистика по файлам и чанкам...")
+        self.txt_stats.setFont(QFont("Consolas", 10))
+        self.txt_stats.setPlaceholderText("Статистика...")
         self.tabs.addTab(self.txt_stats, "📊 Статистика")
 
-        right_layout.addWidget(self.tabs)
+        ml.addWidget(self.tabs)
+        root.addWidget(main, 1)
 
-        # Добавляем панели в splitter
-        splitter.addWidget(left_widget)
-        splitter.addWidget(right_widget)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-
-        # Статус бар
-        self.statusBar().showMessage("Готов к работе")
+        self.statusBar().showMessage("Готов")
 
     def _setup_styles(self):
-        """Настройка стилей"""
         self.setStyleSheet("""
-            QMainWindow {
-                background-color: #1a1a2e;
-            }
-
-            QLabel#title {
-                color: #e94560;
-                padding: 10px 0;
-            }
-
-            QLabel#subtitle {
-                color: #888;
-                font-size: 13px;
-                margin-bottom: 15px;
-            }
-
-            QGroupBox {
-                color: #e94560;
-                font-size: 13px;
-                font-weight: bold;
-                border: 2px solid #0f3460;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 15px;
-            }
-
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-
+            QMainWindow { background-color: #1e1e2e; }
+            QLabel#title { color: #89b4fa; padding: 4px 0; }
             QPushButton {
-                background-color: #0f3460;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 10px 20px;
-                font-size: 14px;
-                font-weight: bold;
+                background-color: #313244; color: #cdd6f4;
+                border: none; border-radius: 6px; padding: 8px 16px;
+                font-size: 13px; font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #e94560;
+            QPushButton:hover { background-color: #89b4fa; color: #1e1e2e; }
+            QPushButton:disabled { background-color: #252535; color: #555; }
+            QLineEdit {
+                background-color: #313244; color: #cdd6f4;
+                border: 1px solid #45475a; border-radius: 6px;
+                padding: 6px 10px; font-size: 13px;
             }
-            QPushButton:pressed {
-                background-color: #c73e54;
+            QLineEdit:focus { border: 1px solid #89b4fa; }
+            QSpinBox, QComboBox {
+                background-color: #313244; color: #cdd6f4;
+                border: 1px solid #45475a; border-radius: 4px;
+                padding: 4px 8px; font-size: 12px;
             }
-            QPushButton:disabled {
-                background-color: #2a2a4a;
-                color: #666;
+            QGroupBox {
+                color: #89b4fa; font-size: 12px; font-weight: bold;
+                border: 1px solid #45475a; border-radius: 8px;
+                margin-top: 8px; padding-top: 14px;
             }
-
-            QTextEdit {
-                background-color: #16213e;
-                color: #eee;
-                border: 2px solid #0f3460;
-                border-radius: 8px;
-                padding: 10px;
-                font-size: 12px;
-                line-height: 1.5;
-            }
-            QTextEdit:focus {
-                border: 2px solid #e94560;
-            }
-
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
             QListWidget {
-                background-color: #16213e;
-                color: #eee;
-                border: 2px solid #0f3460;
-                border-radius: 8px;
-                padding: 8px;
-                font-size: 12px;
+                background-color: #313244; color: #cdd6f4;
+                border: 1px solid #45475a; border-radius: 6px;
+                padding: 4px; font-size: 12px;
             }
-            QListWidget::item {
-                padding: 8px;
-                border-radius: 4px;
+            QListWidget::item { padding: 5px; border-radius: 3px; }
+            QListWidget::item:selected { background-color: #45475a; }
+            QTextEdit {
+                background-color: #313244; color: #cdd6f4;
+                border: 1px solid #45475a; border-radius: 6px;
+                padding: 10px; font-size: 12px;
             }
-            QListWidget::item:selected {
-                background-color: #0f3460;
-            }
-            QListWidget::item:hover {
-                background-color: #1a3a5c;
-            }
-
             QProgressBar {
-                background-color: #16213e;
-                border: none;
-                border-radius: 8px;
-                text-align: center;
-                color: #eee;
-                font-weight: bold;
-                height: 20px;
+                background-color: #313244; border: none; border-radius: 6px;
+                text-align: center; color: #cdd6f4; height: 16px;
             }
-            QProgressBar::chunk {
-                background-color: #e94560;
-                border-radius: 8px;
-            }
-
-            QComboBox, QSpinBox {
-                background-color: #16213e;
-                color: #eee;
-                border: 2px solid #0f3460;
-                border-radius: 6px;
-                padding: 8px;
-                font-size: 13px;
-            }
-            QComboBox::drop-down {
-                border: none;
-                padding-right: 10px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #16213e;
-                color: #eee;
-                border: 2px solid #0f3460;
-                selection-background-color: #0f3460;
-            }
-
-            QLabel#file_count {
-                color: #888;
-                font-size: 12px;
-                padding: 5px;
-            }
-
-            QStatusBar {
-                background-color: #16213e;
-                color: #888;
-                border-top: 1px solid #0f3460;
-            }
-
+            QProgressBar::chunk { background-color: #89b4fa; border-radius: 6px; }
             QTabWidget::pane {
-                border: 2px solid #0f3460;
-                border-radius: 8px;
-                background-color: #16213e;
+                border: 1px solid #45475a; border-radius: 6px;
+                background-color: #313244;
             }
             QTabBar::tab {
-                background-color: #1a1a2e;
-                color: #888;
-                padding: 10px 20px;
-                margin-right: 2px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                font-weight: bold;
+                background-color: #252535; color: #888;
+                padding: 8px 16px; border-top-left-radius: 4px;
+                border-top-right-radius: 4px; font-size: 12px;
             }
-            QTabBar::tab:selected {
-                background-color: #16213e;
-                color: #e94560;
-            }
-            QTabBar::tab:hover {
-                color: #eee;
-            }
+            QTabBar::tab:selected { background-color: #313244; color: #89b4fa; }
+            QStatusBar { background-color: #252535; color: #888; }
         """)
 
     def _load_files(self):
-        """Открыть диалог выбора файлов"""
         files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Выберите файлы",
-            "",
-            "Все файлы (*.docx *.pdf *.png *.jpg *.jpeg)"
-        )
-
+            self, "Выберите файлы", "",
+            "Все файлы (*.docx *.pdf *.png *.jpg *.jpeg)")
         if files:
-            self.file_paths.extend(files)
+            new_files = [f for f in files if f not in self.file_paths]
+            if not new_files:
+                QMessageBox.information(self, "Информация", "Эти файлы уже загружены")
+                return
+            self.file_paths.extend(new_files)
             self._update_file_list()
             self.btn_extract.setEnabled(True)
-            self.statusBar().showMessage(f"Добавлено файлов: {len(self.file_paths)}")
+            self.statusBar().showMessage(f"Добавлено файлов: {len(new_files)}")
 
     def _update_file_list(self):
-        """Обновить список файлов в UI"""
         self.file_list.clear()
-
-        for file_path in self.file_paths:
-            file_name = Path(file_path).name
-            item = QListWidgetItem(f"📄 {file_name}")
-            item.setData(Qt.ItemDataRole.UserRole, file_path)
-
-            # Статус обработки
-            if file_path in self.extracted_texts:
-                text = self.extracted_texts[file_path]
-                if text.strip():
-                    item.setText(f"✅ {file_name} ({len(text)} симв.)")
-                else:
-                    item.setText(f"⚠️ {file_name} (пусто)")
-
-            self.file_list.addItem(item)
-
-        self.lbl_file_count.setText(f"Загружено файлов: {len(self.file_paths)}")
+        for fp in self.file_paths:
+            name = Path(fp).name
+            text = self.extracted_texts.get(fp, "")
+            if text.strip():
+                self.file_list.addItem(f"✅ {name} ({len(text)} с.)")
+            else:
+                self.file_list.addItem(f"📄 {name}")
+        self.lbl_count.setText(f"Загружено: {len(self.file_paths)}")
 
     def _extract_all(self):
-        """Извлечь текст из всех файлов"""
         if not self.file_paths:
-            QMessageBox.warning(self, "Внимание", "Сначала выберите файлы!")
             return
-
-        self._log(f"Начало извлечения текста из {len(self.file_paths)} файлов...")
+        self.statusBar().showMessage("Извлечение...")
         self.progress.setVisible(True)
-        self.progress.setMaximum(0)  # Бесконечный прогресс
-        self.progress.setValue(0)
+        self.progress.setMaximum(0)
         self.btn_extract.setEnabled(False)
-        self.btn_load.setEnabled(False)
-        self.statusBar().showMessage("Извлечение текста...")
 
-        def on_finished(results):
+        def done(results):
             self.extracted_texts = results
             self.btn_extract.setEnabled(True)
-            self.btn_load.setEnabled(True)
             self.btn_preprocess.setEnabled(True)
             self.progress.setVisible(False)
-            self.statusBar().showMessage("Текст извлечён!")
-
             self._update_file_list()
             self._update_file_selector()
-
-            total_chars = sum(len(t) for t in results.values())
-            total_chars_no_spaces = sum(len(t.replace(' ', '').replace('\n', '')) for t in results.values())
-            total_words = sum(len(t.split()) for t in results.values())
-
-            self._show_stats(results, total_chars, total_chars_no_spaces, total_words)
-
+            total = sum(len(t) for t in results.values())
+            words = sum(len(t.split()) for t in results.values())
+            self._show_stats(results, total, words)
             if results:
-                first_file = list(results.keys())[0]
-                first_name = Path(first_file).name
-                first_text = results[first_file]
-                self._show_raw_result(first_name, first_text)
-                self._log(f"Всего извлечено: {total_chars} символов, {total_words} слов")
+                f = list(results.keys())[0]
+                self._show_raw_result(Path(f).name, results[f])
+            self.statusBar().showMessage(f"Извлечено: {total} символов")
 
-        def on_error(error):
-            self._log(f"Ошибка: {error}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка извлечения текста:\n{error}")
+        def err(e):
             self.btn_extract.setEnabled(True)
-            self.btn_load.setEnabled(True)
             self.progress.setVisible(False)
+            QMessageBox.critical(self, "Ошибка", str(e))
 
-        self.worker = WorkerThread(
-            self.loader.load_multiple,
-            self.file_paths
-        )
-        self.worker.finished.connect(on_finished)
-        self.worker.error.connect(on_error)
+        self.worker = WorkerThread(self.loader.load_multiple, self.file_paths)
+        self.worker.finished.connect(done)
+        self.worker.error.connect(err)
         self.worker.start()
 
     def _preprocess_all(self):
-        """Предобработать все извлечённые тексты"""
         if not self.extracted_texts:
-            QMessageBox.warning(self, "Внимание", "Сначала извлеките текст!")
             return
-
-        # Обновляем параметры препроцессора
         self.preprocessor = TextPreprocessor(
-            chunk_size=self.chunk_size_spin.value(),
-            overlap_sentences=self.chunk_overlap_spin.value()
-        )
-
-        self._log(f"Начало предобработки {len(self.extracted_texts)} файлов...")
+            chunk_size=self.spin_size.value(),
+            overlap_sentences=self.spin_overlap.value())
+        self.statusBar().showMessage("Предобработка...")
         self.progress.setVisible(True)
-        self.progress.setMaximum(0)  # Бесконечный прогресс
-        self.progress.setValue(0)
+        self.progress.setMaximum(0)
         self.btn_preprocess.setEnabled(False)
-        self.btn_extract.setEnabled(False)
-        self.statusBar().showMessage("Предобработка текста...")
 
-        def on_finished(results):
+        def done(results):
             self.chunks = results
             self.btn_preprocess.setEnabled(True)
-            self.btn_load.setEnabled(True)
-            self.btn_extract.setEnabled(True)
             self.progress.setVisible(False)
-
-            # Считаем
             total_chunks = sum(len(c) for c in results.values())
-            total_chunk_chars = sum(
-                len(chunk.text)
-                for chunks_list in results.values()
-                for chunk in chunks_list
-            )
-
-            self.statusBar().showMessage(f"Предобработка завершена! Создано чанков: {total_chunks}")
-            self._log(
-                f"Создано {total_chunks} чанков, "
-                f"{total_chunk_chars} символов в чанках"
-            )
-
-            # Сначала показываем чанки первого файла
             if results:
-                first_file = list(results.keys())[0]
-                file_name = Path(first_file).name
-                file_chunks = results[first_file]
-                self._show_chunks(file_name, file_chunks)
+                f = list(results.keys())[0]
+                self._show_chunks(Path(f).name, results[f])
+            self._show_stats_with_chunks(self.extracted_texts, results, total_chunks)
+            self.statusBar().showMessage(f"Создано {total_chunks} чанков")
+            self._build_index()
 
-            # Потом обновляем статистику
-            total_chars = sum(len(t) for t in self.extracted_texts.values())
-            self._show_stats_with_chunks(
-                self.extracted_texts, results, total_chars, total_chunks
-            )
-
-            # Обновляем список файлов
-            self._update_file_list()
-
-        def on_error(error):
-            self._log(f"Ошибка: {error}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка предобработки:\n{error}")
+        def err(e):
             self.btn_preprocess.setEnabled(True)
-            self.btn_extract.setEnabled(True)
             self.progress.setVisible(False)
+            QMessageBox.critical(self, "Ошибка", str(e))
 
         self.worker = WorkerThread(
-            self.preprocessor.process_documents,
-            self.extracted_texts
-        )
-        self.worker.finished.connect(on_finished)
-        self.worker.error.connect(on_error)
+            self.preprocessor.process_documents, self.extracted_texts)
+        self.worker.finished.connect(done)
+        self.worker.error.connect(err)
         self.worker.start()
 
-    def _show_raw_result(self, file_name, text):
-        """Показать сырой текст"""
-        if len(text) > 50000:
-            html_text = f'''
-            <div style="background-color: #1a1a2e; padding: 20px; border-radius: 8px;">
-                <div style="color: #e94560; font-size: 18px; font-weight: bold; margin-bottom: 15px;">
-                    📄 {file_name} (СЫРОЙ ТЕКСТ)
-                </div>
-                <div style="color: #888; font-size: 12px; margin-bottom: 20px; padding: 10px; background-color: #0f3460; border-radius: 6px;">
-                    <b>Символов:</b> <span style="color: #e94560;">{len(text)}</span> |
-                    <b>Слов:</b> <span style="color: #e94560;">{len(text.split())}</span> |
-                    <b>Строк:</b> <span style="color: #e94560;">{len(text.splitlines())}</span>
-                </div>
-                <div style="color: #eee; line-height: 1.6; white-space: pre-wrap; font-size: 11px; font-family: monospace;">
-                    {text}
-                </div>
-            </div>
-            '''
-        else:
-            html_text = f'''
-            <div style="background-color: #1a1a2e; padding: 20px; border-radius: 8px;">
-                <div style="color: #e94560; font-size: 18px; font-weight: bold; margin-bottom: 15px;">
-                    📄 {file_name} (СЫРОЙ ТЕКСТ)
-                </div>
-                <div style="color: #888; font-size: 12px; margin-bottom: 20px; padding: 10px; background-color: #0f3460; border-radius: 6px;">
-                    <b>Символов:</b> <span style="color: #e94560;">{len(text)}</span> |
-                    <b>Слов:</b> <span style="color: #e94560;">{len(text.split())}</span> |
-                    <b>Строк:</b> <span style="color: #e94560;">{len(text.splitlines())}</span>
-                </div>
-                <div style="color: #eee; line-height: 1.8; white-space: pre-wrap; font-size: 13px;">
-                    {text}
-                </div>
-            </div>
-            '''
-        self.txt_result.setHtml(html_text)
-        self.txt_result.verticalScrollBar().setValue(0)
-
-    def _show_chunks(self, file_name, chunks):
-        """Показать ВСЕ чанки файла списком с прокруткой"""
-        if not chunks:
-            self.txt_chunks.setHtml('''
-            <div style="background-color: #1a1a2e; padding: 20px; border-radius: 8px;">
-                <div style="color: #888; font-size: 14px;">Нет чанков</div>
-            </div>
-            ''')
+    def _build_index(self):
+        if not self.chunks:
             return
 
-        total = len(chunks)
-        html_text = f'''
-        <div style="background-color: #1a1a2e; padding: 20px; border-radius: 8px;">
-            <div style="color: #e94560; font-size: 18px; font-weight: bold; margin-bottom: 15px;">
-                🔪 {file_name} — {total} чанков
-            </div>
-        '''
+        def done(index):
+            self.index = index
+            self.index_ready = True
+            self.searcher = SemanticSearch(index, self.index_builder.vectorizer)
+            self.btn_search.setEnabled(True)
+            self.statusBar().showMessage(f"Индекс: {index.size} векторов")
 
-        for chunk in chunks:
-            html_text += f'''
-            <div style="background-color: #16213e; padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 4px solid #e94560;">
-                <div style="color: #e94560; font-size: 13px; font-weight: bold; margin-bottom: 8px;">
-                    Чанк #{chunk.chunk_index + 1} из {total}
-                </div>
-                <div style="color: #888; font-size: 11px; margin-bottom: 8px;">
-                    <b>Символов:</b> <span style="color: #e94560;">{len(chunk.text)}</span> |
-                    <b>Слов:</b> <span style="color: #e94560;">{len(chunk.text.split())}</span>
-                </div>
-                <div style="color: #eee; line-height: 1.6; white-space: pre-wrap; font-size: 12px; background-color: #0f3460; padding: 10px; border-radius: 6px;">
-                    {html_module.escape(chunk.text)}
-                </div>
-            </div>
-            '''
+        def err(e):
+            QMessageBox.critical(self, "Ошибка индексации", str(e))
 
-        html_text += '</div>'
-        self.txt_chunks.setHtml(html_text)
-        self.txt_chunks.verticalScrollBar().setValue(0)
+        self.statusBar().showMessage("Построение индекса...")
+        self.index_builder = IndexBuilder(batch_size=32)
+        self.worker = WorkerThread(
+            self.index_builder.build_from_chunks, self.chunks)
+        self.worker.finished.connect(done)
+        self.worker.error.connect(err)
+        self.worker.start()
+
+    def _do_search(self):
+        if not self.index_ready or self.index is None:
+            QMessageBox.warning(self, "Внимание", "Сначала предобработайте документы!")
+            return
+        query = self.search_input.text().strip()
+        if not query:
+            return
+        self.statusBar().showMessage(f"Поиск: {query}")
+        self.btn_search.setEnabled(False)
+
+        def done(results):
+            self._show_search_results(query, results)
+            self.btn_search.setEnabled(True)
+            self.statusBar().showMessage(f"Найдено: {len(results)}")
+            self.tabs.setCurrentWidget(self.txt_search_results)
+
+        def err(e):
+            self.btn_search.setEnabled(True)
+            QMessageBox.critical(self, "Ошибка поиска", str(e))
+
+        self.worker = WorkerThread(
+            self._search_thread, query, self.spin_topk.value())
+        self.worker.finished.connect(done)
+        self.worker.error.connect(err)
+        self.worker.start()
+
+    def _search_thread(self, query, top_k):
+        return self.searcher.search(query, top_k=top_k)
+
+    def _show_raw_result(self, name, text):
+        self.txt_result.setPlainText(text)
+        self.tabs.setCurrentWidget(self.txt_result)
+
+    def _show_chunks(self, name, chunks):
+        html = f"<b>🔪 {name}</b> — {len(chunks)} чанков<br><br>"
+        for c in chunks:
+            sec = c.metadata.get("section", "")
+            tag = f"[{sec}] " if sec else ""
+            html += f"<div style='margin-bottom:12px; padding:8px; background:#1e1e2e; border-radius:6px;'>"
+            html += f"<b style='color:#89b4fa;'>Чанк #{c.chunk_index + 1}</b> {tag}"
+            html += f" ({len(c.text)} с.)<br>{html_module.escape(c.text)}"
+            html += f"</div>"
+        self.txt_chunks.setHtml(html)
+
+    def _show_search_results(self, query, results):
+        if not results:
+            self.txt_search_results.setHtml("<b>Ничего не найдено</b>")
+            return
+        html = f"<b>🔎 Запрос:</b> {html_module.escape(query)}<br><br>"
+        for i, r in enumerate(results):
+            name = Path(r.file_path).name
+            sec = r.metadata.get("section", "")
+            tag = f"[{sec}] " if sec else ""
+            color = "#a6e3a1" if r.score > 0.7 else "#f9e2af" if r.score > 0.5 else "#f38ba8"
+            html += f"<div style='margin-bottom:12px; padding:8px; background:#1e1e2e; border-left:3px solid {color}; border-radius:6px;'>"
+            html += f"<b style='color:{color};'>#{i+1}</b> {html_module.escape(name)} {tag}"
+            html += f" — <b>{r.score*100:.0f}%</b> ({len(r.text)} с.)<br>"
+            html += html_module.escape(r.text)
+            html += f"</div>"
+        self.txt_search_results.setHtml(html)
 
     def _update_file_selector(self):
-        """Обновить переключатель файлов"""
         self.file_selector.clear()
-        for file_path in self.file_paths:
-            file_name = Path(file_path).name
-            self.file_selector.addItem(f"📄 {file_name}", file_path)
+        for fp in self.file_paths:
+            self.file_selector.addItem(Path(fp).name, fp)
 
     def _on_file_selected(self, index):
-        """При выборе файла показать его текст и чанки"""
-        if index >= 0 and index < len(self.file_paths):
-            file_path = self.file_paths[index]
-            file_name = Path(file_path).name
+        if index < 0 or index >= len(self.file_paths):
+            return
+        fp = self.file_paths[index]
+        name = Path(fp).name
+        if fp in self.extracted_texts:
+            self._show_raw_result(name, self.extracted_texts[fp])
+        if fp in self.chunks:
+            self._show_chunks(name, self.chunks[fp])
 
-            # Сырой текст
-            if file_path in self.extracted_texts:
-                text = self.extracted_texts[file_path]
-                self._show_raw_result(file_name, text)
+    def _show_stats(self, results, total_chars, total_words):
+        html = f"<b>📊 Извлечение текста</b><br><br>"
+        html += f"Файлов: {len(results)}<br>Символов: {total_chars}<br>Слов: {total_words}<br><br>"
+        for fp, text in results.items():
+            html += f"<b>📄 {Path(fp).name}</b><br>"
+            html += f"  Символов: {len(text)} | Слов: {len(text.split())} | Строк: {len(text.splitlines())}<br>"
+        self.txt_stats.setHtml(html)
 
-            # Чанки
-            if file_path in self.chunks:
-                chunks = self.chunks[file_path]
-                self._show_chunks(file_name, chunks)
-
-    def _show_stats(self, results, total_chars, total_chars_no_spaces, total_words):
-        """Показать статистику по файлам (без чанков)"""
-        html_text = f'''
-        <div style="background-color: #1a1a2e; padding: 20px; border-radius: 8px;">
-            <div style="color: #e94560; font-size: 18px; font-weight: bold; margin-bottom: 20px;">
-                📊 Статистика извлечения текста
-            </div>
-
-            <div style="background-color: #0f3460; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
-                <div style="color: #eee; font-size: 14px;">
-                    <div style="margin-bottom: 10px;">
-                        <b>Всего файлов:</b> <span style="color: #e94560; font-size: 16px;">{len(results)}</span>
-                    </div>
-                    <div style="margin-bottom: 10px;">
-                        <b>Всего символов:</b> <span style="color: #e94560; font-size: 16px;">{total_chars}</span>
-                    </div>
-                    <div style="margin-bottom: 10px;">
-                        <b>Без пробелов:</b> <span style="color: #e94560; font-size: 16px;">{total_chars_no_spaces}</span>
-                    </div>
-                    <div>
-                        <b>Всего слов:</b> <span style="color: #e94560; font-size: 16px;">{total_words}</span>
-                    </div>
-                </div>
-            </div>
-
-            <div style="color: #888; font-size: 13px; margin-bottom: 10px;">
-                <b>Детали по файлам:</b>
-            </div>
-        '''
-
-        for file_path, text in results.items():
-            file_name = Path(file_path).name
-            chars = len(text)
-            words = len(text.split())
-            lines = len(text.splitlines())
-
-            status_icon = "✅" if text.strip() else "⚠️"
-
-            html_text += f'''
-            <div style="background-color: #16213e; padding: 12px; margin: 8px 0; border-radius: 6px; border-left: 4px solid {'#e94560' if text.strip() else '#888'};">
-                <div style="color: #eee; font-size: 14px; font-weight: bold; margin-bottom: 8px;">
-                    {status_icon} {file_name}
-                </div>
-                <div style="color: #888; font-size: 12px; display: flex; gap: 20px;">
-                    <span>Символов: <b style="color: #e94560;">{chars}</b></span>
-                    <span>Слов: <b style="color: #e94560;">{words}</b></span>
-                    <span>Строк: <b style="color: #e94560;">{lines}</b></span>
-                </div>
-            </div>
-            '''
-
-        html_text += '</div>'
-        self.txt_stats.setHtml(html_text)
-
-    def _show_stats_with_chunks(self, texts, chunks, total_chars, total_chunks):
-        """Показать статистику с информацией о чанках"""
-        total_chunk_chars = sum(
-            len(chunk.text)
-            for chunks_list in chunks.values()
-            for chunk in chunks_list
-        )
-        avg_chunk_size = total_chunk_chars // total_chunks if total_chunks > 0 else 0
-
-        html_text = f'''
-        <div style="background-color: #1a1a2e; padding: 20px; border-radius: 8px;">
-            <div style="color: #e94560; font-size: 18px; font-weight: bold; margin-bottom: 20px;">
-                📊 Статистика: Извлечение + Предобработка
-            </div>
-
-            <div style="background-color: #0f3460; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
-                <div style="color: #eee; font-size: 14px;">
-                    <div style="margin-bottom: 8px;">
-                        <b>📁 Файлов:</b> <span style="color: #e94560; font-size: 16px;">{len(texts)}</span>
-                    </div>
-                    <div style="margin-bottom: 8px;">
-                        <b>📝 Символов (сырой):</b> <span style="color: #e94560; font-size: 16px;">{total_chars}</span>
-                    </div>
-                    <div style="margin-bottom: 8px;">
-                        <b>🔪 Всего чанков:</b> <span style="color: #e94560; font-size: 16px;">{total_chunks}</span>
-                    </div>
-                    <div style="margin-bottom: 8px;">
-                        <b>📏 Средний размер чанка:</b> <span style="color: #e94560; font-size: 16px;">{avg_chunk_size} симв.</span>
-                    </div>
-                    <div>
-                        <b>📊 Символов в чанках:</b> <span style="color: #e94560; font-size: 16px;">{total_chunk_chars}</span>
-                    </div>
-                </div>
-            </div>
-
-            <div style="color: #888; font-size: 13px; margin-bottom: 10px;">
-                <b>Параметры предобработки:</b>
-            </div>
-            <div style="background-color: #16213e; padding: 10px; border-radius: 6px; margin-bottom: 20px; color: #eee; font-size: 13px;">
-                Стратегия: <b style="color: #e94560;">DOCX-структурное / предложения</b> |
-                Размер чанка: <b style="color: #e94560;">{self.chunk_size_spin.value()}</b> |
-                Overlap: <b style="color: #e94560;">{self.chunk_overlap_spin.value()}</b> предл.
-            </div>
-
-            <div style="color: #888; font-size: 13px; margin-bottom: 10px;">
-                <b>Детали по файлам:</b>
-            </div>
-        '''
-
-        for file_path in texts.keys():
-            file_name = Path(file_path).name
-            raw_text = texts[file_path]
-            file_chunks = chunks.get(file_path, [])
-
-            chars = len(raw_text)
-            words = len(raw_text.split())
-            num_chunks = len(file_chunks)
-
-            chunk_sizes = [len(c.text) for c in file_chunks] if file_chunks else []
-            avg_size = sum(chunk_sizes) // len(chunk_sizes) if chunk_sizes else 0
-            min_size = min(chunk_sizes) if chunk_sizes else 0
-            max_size = max(chunk_sizes) if chunk_sizes else 0
-
-            status_icon = "✅" if raw_text.strip() else "⚠️"
-
-            html_text += f'''
-            <div style="background-color: #16213e; padding: 12px; margin: 8px 0; border-radius: 6px; border-left: 4px solid {'#e94560' if raw_text.strip() else '#888'};">
-                <div style="color: #eee; font-size: 14px; font-weight: bold; margin-bottom: 8px;">
-                    {status_icon} {file_name}
-                </div>
-                <div style="color: #888; font-size: 12px; display: flex; gap: 20px; margin-bottom: 5px;">
-                    <span>Символов: <b style="color: #e94560;">{chars}</b></span>
-                    <span>Слов: <b style="color: #e94560;">{words}</b></span>
-                </div>
-                <div style="color: #e94560; font-size: 12px;">
-                    🔪 Чанков: <b>{num_chunks}</b> |
-                    Средний: <b>{avg_size}</b> |
-                    Мин: <b>{min_size}</b> |
-                    Макс: <b>{max_size}</b>
-                </div>
-            </div>
-            '''
-
-        html_text += '</div>'
-        self.txt_stats.setHtml(html_text)
-
-    def _log(self, message):
-        """Логирование в статус бар"""
-        self.statusBar().showMessage(message)
-        print(f"[LOG] {message}")
+    def _show_stats_with_chunks(self, texts, chunks, total_chunks):
+        total_cc = sum(len(c.text) for cl in chunks.values() for c in cl)
+        avg = total_cc // total_chunks if total_chunks else 0
+        html = f"<b>📊 Извлечение + Предобработка</b><br><br>"
+        html += f"Файлов: {len(texts)}<br>Символов: {sum(len(t) for t in texts.values())}<br>"
+        html += f"Чанков: {total_chunks}<br>Средний размер: {avg} симв.<br><br>"
+        for fp in texts.keys():
+            name = Path(fp).name
+            nc = len(chunks.get(fp, []))
+            sizes = [len(c.text) for c in chunks.get(fp, [])]
+            mn = min(sizes) if sizes else 0
+            mx = max(sizes) if sizes else 0
+            html += f"<b>📄 {name}</b><br>"
+            html += f"  Чанков: {nc} | Мин: {mn} | Макс: {mx}<br>"
+        self.txt_stats.setHtml(html)
 
     def _clear(self):
-        """Очистка"""
         self.file_paths = []
         self.extracted_texts = {}
         self.chunks = {}
+        self.index = None
+        self.index_ready = False
+        self.index_builder = None
+        self.searcher = None
         self.file_list.clear()
         self.file_selector.clear()
-        self.lbl_file_count.setText("Загружено файлов: 0")
+        self.lbl_count.setText("Загружено: 0")
         self.btn_extract.setEnabled(False)
         self.btn_preprocess.setEnabled(False)
-        self.btn_load.setEnabled(True)
+        self.btn_search.setEnabled(False)
         self.txt_result.clear()
-        self.txt_result.setPlaceholderText("Здесь появится полный текст извлечённых документов...")
         self.txt_chunks.clear()
-        self.txt_chunks.setPlaceholderText("Здесь появятся чанки после предобработки...")
+        self.txt_search_results.clear()
         self.txt_stats.clear()
-        self.txt_stats.setPlaceholderText("Статистика по файлам и чанкам...")
         self.statusBar().showMessage("Очищено")
 
 
 def main():
     app = QApplication(sys.argv)
-    window = TestWindow()
-    window.show()
+    w = TestWindow()
+    w.show()
     sys.exit(app.exec())
 
 
