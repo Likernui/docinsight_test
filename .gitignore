@@ -49,3 +49,7 @@ ENV/
 
 # Логи
 *.log
+
+.qwen/
+*.docx
+*.pdf
