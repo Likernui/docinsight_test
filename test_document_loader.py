@@ -45,10 +45,13 @@ def test_docx_extraction():
         print(f"\n📄 Файл: {file_path.name}")
         print("-" * 60)
         try:
-]            print(f"✅ Успешно! Символов: {len(text)}")
+            text = extractor.extract(str(file_path))  # ← ВАЖНО
+
+            print(f"✅ Успешно! Символов: {len(text)}")
             print(f"   Слов: {len(text.split())}")
             print(f"\nПервые 500 символов:")
             print(f"   {text[:500]}...")
+            
         except Exception as e:
             print(f"❌ Ошибка: {e}")
 

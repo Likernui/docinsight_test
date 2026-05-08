@@ -367,12 +367,16 @@ class TextPreprocessor:
             return []
         
         # Определяем формат
-        if file_path.lower().endswith('.docx'):
+        #if file_path.lower().endswith('.docx'):
             # Структурное разбиение DOCX
-            return self.chunker.chunk_from_docx(file_path)
-        else:
+            #return self.chunker.chunk_from_docx(file_path)
+        #else:
             # Разбиение по предложениям
-            return self.chunker.chunk_from_text(cleaned, file_path, metadata)
+            #return self.chunker.chunk_from_text(cleaned, file_path, metadata)
+        
+                # Для всех форматов используем уже извлечённый текст,
+        # потому что DocumentLoader уже достал и параграфы, и таблицы.
+        return self.chunker.chunk_from_text(cleaned, file_path, metadata)
     
     def process_documents(
         self,

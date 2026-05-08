@@ -24,7 +24,7 @@ from src.text_extractor import DocumentLoader
 from src.preprocessor import TextPreprocessor
 from src.indexer import IndexBuilder, VectorIndex
 from src.semantic_search import SemanticSearch
-
+from src.entity_extractor import EntityExtractor
 
 class WorkerThread(QThread):
     finished = pyqtSignal(object)
@@ -51,6 +51,7 @@ class TestWindow(QMainWindow):
         self.file_paths = []
         self.extracted_texts = {}
         self.preprocessor = TextPreprocessor()
+        self.entity_extractor = None
         self.chunks = {}
         self.index = None
         self.index_builder = None
@@ -346,15 +347,27 @@ class TestWindow(QMainWindow):
         self.btn_preprocess.setEnabled(False)
 
         def done(results):
-            self.chunks = results
+            self.statusBar().showMessage("Извлечение сущностей GLiNER...")
+
+            self.entity_extractor = EntityExtractor()
+            self.chunks = self.entity_extractor.enrich_chunks_dict(results)
+
+            structure = self.entity_extractor.extract_all_documents_structure(self.chunks)
+            print("DOCUMENT STRUCTURE:")
+            print(structure)
+
             self.btn_preprocess.setEnabled(True)
             self.progress.setVisible(False)
-            total_chunks = sum(len(c) for c in results.values())
-            if results:
-                f = list(results.keys())[0]
-                self._show_chunks(Path(f).name, results[f])
-            self._show_stats_with_chunks(self.extracted_texts, results, total_chunks)
-            self.statusBar().showMessage(f"Создано {total_chunks} чанков")
+
+            total_chunks = sum(len(c) for c in self.chunks.values())
+
+            if self.chunks:
+                f = list(self.chunks.keys())[0]
+                self._show_chunks(Path(f).name, self.chunks[f])
+
+            self._show_stats_with_chunks(self.extracted_texts, self.chunks, total_chunks)
+            self.statusBar().showMessage(f"Создано {total_chunks} чанков, сущности извлечены")
+
             self._build_index()
 
         def err(e):
@@ -428,10 +441,28 @@ class TestWindow(QMainWindow):
         for c in chunks:
             sec = c.metadata.get("section", "")
             tag = f"[{sec}] " if sec else ""
+
             html += f"<div style='margin-bottom:12px; padding:8px; background:#1e1e2e; border-radius:6px;'>"
             html += f"<b style='color:#89b4fa;'>Чанк #{c.chunk_index + 1}</b> {tag}"
-            html += f" ({len(c.text)} с.)<br>{html_module.escape(c.text)}"
-            html += f"</div>"
+            html += f" ({len(c.text)} с.)<br>"
+
+            entities = c.metadata.get("entities", [])
+
+            if entities:
+                html += "<div style='margin-top:6px; margin-bottom:6px; color:#a6e3a1;'>"
+                html += "<b>Сущности:</b><br>"
+
+                for e in entities[:10]:
+                    text = html_module.escape(str(e.get("text", "")))
+                    label = html_module.escape(str(e.get("label", "")))
+                    html += f"• {text} ({label})<br>"
+
+                if len(entities) > 10:
+                    html += f"... ещё {len(entities) - 10}<br>"
+
+                html += "</div>"
+            html += "<br>" + html_module.escape(c.text)
+            html += "</div>"
         self.txt_chunks.setHtml(html)
 
     def _show_search_results(self, query, results):

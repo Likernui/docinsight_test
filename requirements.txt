@@ -15,9 +15,11 @@ faiss-cpu>=1.7.4
 # NER
 transformers>=4.30.0
 torch>=2.0.0
+gliner>=0.2.0
 
 # Утилиты
 tqdm>=4.65.0
 
 # Тестирование
 pytest>=7.0.0
+
