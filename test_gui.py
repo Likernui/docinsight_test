@@ -14,17 +14,11 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QFileDialog, QLabel, QProgressBar,
     QMessageBox, QListWidget, QListWidgetItem, QTabWidget,
-    QComboBox, QSpinBox, QGroupBox, QLineEdit,
+    QComboBox, QSpinBox, QGroupBox, QLineEdit, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 import html as html_module
-
-from src.text_extractor import DocumentLoader
-from src.preprocessor import TextPreprocessor
-from src.indexer import IndexBuilder, VectorIndex
-from src.semantic_search import SemanticSearch
-from src.entity_extractor import EntityExtractor
 
 class WorkerThread(QThread):
     finished = pyqtSignal(object)
@@ -47,6 +41,18 @@ class WorkerThread(QThread):
 class TestWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        from src.text_extractor import DocumentLoader
+        from src.preprocessor import TextPreprocessor, TextChunk
+        from src.indexer import IndexBuilder
+        from src.semantic_search import SemanticSearch
+        from src.entity_service import EntityService
+
+        self.TextPreprocessor = TextPreprocessor
+        self.TextChunk = TextChunk
+        self.IndexBuilder = IndexBuilder
+        self.SemanticSearch = SemanticSearch
+        self.entity_service = EntityService(Path(__file__).parent)
+
         self.loader = DocumentLoader()
         self.file_paths = []
         self.extracted_texts = {}
@@ -57,11 +63,13 @@ class TestWindow(QMainWindow):
         self.index_builder = None
         self.index_ready = False
         self.searcher = None
+        self.index_dirty = False
+        self.last_search_results = []
         self._init_ui()
         self._setup_styles()
 
     def _init_ui(self):
-        self.setMinimumSize(1300, 750)
+        self.setMinimumSize(1500, 950)
         self.setWindowTitle("DocInsight — Тест")
 
         central = QWidget()
@@ -72,10 +80,10 @@ class TestWindow(QMainWindow):
 
         # SIDEBAR
         sidebar = QWidget()
-        sidebar.setFixedWidth(300)
+        sidebar.setFixedWidth(430)
         sb = QVBoxLayout(sidebar)
-        sb.setContentsMargins(10, 10, 10, 10)
-        sb.setSpacing(10)
+        sb.setContentsMargins(14, 14, 14, 14)
+        sb.setSpacing(12)
 
         self.btn_load = QPushButton("📁 Выбрать файлы")
         self.btn_load.setFixedHeight(40)
@@ -104,15 +112,16 @@ class TestWindow(QMainWindow):
         # Предобработка
         g1 = QGroupBox("Предобработка")
         g1l = QVBoxLayout(g1)
-        g1l.setContentsMargins(8, 8, 8, 8)
-        g1l.setSpacing(6)
+        g1l.setContentsMargins(14, 16, 14, 14)
+        g1l.setSpacing(10)
 
         r1 = QHBoxLayout()
         r1.addWidget(QLabel("Размер:"))
         self.spin_size = QSpinBox()
-        self.spin_size.setRange(200, 2000)
-        self.spin_size.setValue(500)
-        self.spin_size.setSingleStep(50)
+        self.spin_size.setMinimumWidth(120)
+        self.spin_size.setRange(400, 4000)
+        self.spin_size.setValue(1500)
+        self.spin_size.setSingleStep(100)
         r1.addWidget(self.spin_size)
         r1.addWidget(QLabel("симв."))
         g1l.addLayout(r1)
@@ -120,14 +129,32 @@ class TestWindow(QMainWindow):
         r2 = QHBoxLayout()
         r2.addWidget(QLabel("Overlap:"))
         self.spin_overlap = QSpinBox()
+        self.spin_overlap.setMinimumWidth(120)
         self.spin_overlap.setRange(0, 5)
-        self.spin_overlap.setValue(2)
+        self.spin_overlap.setValue(1)
         r2.addWidget(self.spin_overlap)
         r2.addWidget(QLabel("предл."))
         g1l.addLayout(r2)
 
+        self.chk_entities = QCheckBox("GLiNER сущности")
+        self.chk_entities.setChecked(False)
+        self.chk_entities.setToolTip("На macOS GLiNER может падать из-за нативного ML-стека")
+        g1l.addWidget(self.chk_entities)
+
+        r_mode = QHBoxLayout()
+        r_mode.addWidget(QLabel("Режим:"))
+        self.combo_entities_mode = QComboBox()
+        self.combo_entities_mode.setMinimumWidth(190)
+        self.combo_entities_mode.addItem("Полный", "full")
+        self.combo_entities_mode.addItem("Приоритетный", "priority")
+        self.combo_entities_mode.setToolTip("Полный: все чанки. Приоритетный: первые чанки и чанки с маркерами.")
+        r_mode.addWidget(self.combo_entities_mode)
+        g1l.addLayout(r_mode)
+
+        self.entities_batch_size = 8
+
         self.btn_preprocess = QPushButton("🔪 Предобработать")
-        self.btn_preprocess.setFixedHeight(36)
+        self.btn_preprocess.setFixedHeight(44)
         self.btn_preprocess.clicked.connect(self._preprocess_all)
         self.btn_preprocess.setEnabled(False)
         g1l.addWidget(self.btn_preprocess)
@@ -136,8 +163,8 @@ class TestWindow(QMainWindow):
         # Поиск
         g2 = QGroupBox("Семантический поиск")
         g2l = QVBoxLayout(g2)
-        g2l.setContentsMargins(8, 8, 8, 8)
-        g2l.setSpacing(6)
+        g2l.setContentsMargins(14, 16, 14, 14)
+        g2l.setSpacing(12)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Запрос...")
@@ -148,21 +175,34 @@ class TestWindow(QMainWindow):
         r3 = QHBoxLayout()
         r3.addWidget(QLabel("Top-K:"))
         self.spin_topk = QSpinBox()
+        self.spin_topk.setMinimumWidth(120)
         self.spin_topk.setRange(1, 50)
         self.spin_topk.setValue(5)
         r3.addWidget(self.spin_topk)
         r3.addStretch()
         g2l.addLayout(r3)
 
+        self.btn_build_index = QPushButton("🧠 Построить индекс")
+        self.btn_build_index.setFixedHeight(44)
+        self.btn_build_index.clicked.connect(self._build_index)
+        self.btn_build_index.setEnabled(False)
+        g2l.addWidget(self.btn_build_index)
+
         self.btn_search = QPushButton("🔎 Найти")
-        self.btn_search.setFixedHeight(36)
+        self.btn_search.setFixedHeight(44)
         self.btn_search.clicked.connect(self._do_search)
         self.btn_search.setEnabled(False)
         g2l.addWidget(self.btn_search)
+
+        self.btn_entities_from_search = QPushButton("🏷️ GLiNER по поиску")
+        self.btn_entities_from_search.setFixedHeight(44)
+        self.btn_entities_from_search.clicked.connect(self._extract_entities_from_search)
+        self.btn_entities_from_search.setEnabled(False)
+        g2l.addWidget(self.btn_entities_from_search)
         sb.addWidget(g2)
 
         self.btn_clear = QPushButton("🗑️ Очистить")
-        self.btn_clear.setFixedHeight(36)
+        self.btn_clear.setFixedHeight(44)
         self.btn_clear.clicked.connect(self._clear)
         sb.addWidget(self.btn_clear)
         sb.addStretch()
@@ -172,17 +212,19 @@ class TestWindow(QMainWindow):
         # MAIN AREA
         main = QWidget()
         ml = QVBoxLayout(main)
-        ml.setSpacing(6)
+        ml.setSpacing(10)
         ml.setContentsMargins(10, 10, 10, 10)
 
-        title = QLabel("🧪 DocInsight")
+        title = QLabel("DocInsight")
         title.setObjectName("title")
-        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        title.setFont(QFont("Arial", 18, QFont.Weight.Bold))
         ml.addWidget(title)
 
         sel = QHBoxLayout()
         sel.addWidget(QLabel("Файл:"))
         self.file_selector = QComboBox()
+        self.file_selector.setMinimumWidth(700)
+        self.file_selector.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.file_selector.currentIndexChanged.connect(self._on_file_selected)
         sel.addWidget(self.file_selector)
         sel.addStretch()
@@ -192,25 +234,31 @@ class TestWindow(QMainWindow):
 
         self.txt_result = QTextEdit()
         self.txt_result.setReadOnly(True)
-        self.txt_result.setFont(QFont("Consolas", 10))
+        self.txt_result.setFont(QFont("Menlo", 10))
         self.txt_result.setPlaceholderText("Текст документа...")
         self.tabs.addTab(self.txt_result, "📄 Текст")
 
         self.txt_chunks = QTextEdit()
         self.txt_chunks.setReadOnly(True)
-        self.txt_chunks.setFont(QFont("Consolas", 10))
+        self.txt_chunks.setFont(QFont("Menlo", 10))
         self.txt_chunks.setPlaceholderText("Чанки...")
         self.tabs.addTab(self.txt_chunks, "🔪 Чанки")
 
+        self.txt_entities = QTextEdit()
+        self.txt_entities.setReadOnly(True)
+        self.txt_entities.setFont(QFont("Menlo", 10))
+        self.txt_entities.setPlaceholderText("Сущности...")
+        self.tabs.addTab(self.txt_entities, "🏷️ Сущности")
+
         self.txt_search_results = QTextEdit()
         self.txt_search_results.setReadOnly(True)
-        self.txt_search_results.setFont(QFont("Consolas", 10))
+        self.txt_search_results.setFont(QFont("Menlo", 10))
         self.txt_search_results.setPlaceholderText("Результаты поиска...")
         self.tabs.addTab(self.txt_search_results, "🔎 Поиск")
 
         self.txt_stats = QTextEdit()
         self.txt_stats.setReadOnly(True)
-        self.txt_stats.setFont(QFont("Consolas", 10))
+        self.txt_stats.setFont(QFont("Menlo", 10))
         self.txt_stats.setPlaceholderText("Статистика...")
         self.tabs.addTab(self.txt_stats, "📊 Статистика")
 
@@ -225,8 +273,9 @@ class TestWindow(QMainWindow):
             QLabel#title { color: #89b4fa; padding: 4px 0; }
             QPushButton {
                 background-color: #313244; color: #cdd6f4;
-                border: none; border-radius: 6px; padding: 8px 16px;
+                border: none; border-radius: 6px; padding: 8px 14px;
                 font-size: 13px; font-weight: bold;
+                min-height: 28px;
             }
             QPushButton:hover { background-color: #89b4fa; color: #1e1e2e; }
             QPushButton:disabled { background-color: #252535; color: #555; }
@@ -240,6 +289,7 @@ class TestWindow(QMainWindow):
                 background-color: #313244; color: #cdd6f4;
                 border: 1px solid #45475a; border-radius: 4px;
                 padding: 4px 8px; font-size: 12px;
+                min-height: 26px;
             }
             QGroupBox {
                 color: #89b4fa; font-size: 12px; font-weight: bold;
@@ -270,7 +320,7 @@ class TestWindow(QMainWindow):
             }
             QTabBar::tab {
                 background-color: #252535; color: #888;
-                padding: 8px 16px; border-top-left-radius: 4px;
+                padding: 8px 14px; border-top-left-radius: 4px;
                 border-top-right-radius: 4px; font-size: 12px;
             }
             QTabBar::tab:selected { background-color: #313244; color: #89b4fa; }
@@ -338,7 +388,7 @@ class TestWindow(QMainWindow):
     def _preprocess_all(self):
         if not self.extracted_texts:
             return
-        self.preprocessor = TextPreprocessor(
+        self.preprocessor = self.TextPreprocessor(
             chunk_size=self.spin_size.value(),
             overlap_sentences=self.spin_overlap.value())
         self.statusBar().showMessage("Предобработка...")
@@ -346,29 +396,17 @@ class TestWindow(QMainWindow):
         self.progress.setMaximum(0)
         self.btn_preprocess.setEnabled(False)
 
-        def done(results):
-            self.statusBar().showMessage("Извлечение сущностей GLiNER...")
-
-            self.entity_extractor = EntityExtractor()
-            self.chunks = self.entity_extractor.enrich_chunks_dict(results)
-
-            structure = self.entity_extractor.extract_all_documents_structure(self.chunks)
-            print("DOCUMENT STRUCTURE:")
-            print(structure)
-
-            self.btn_preprocess.setEnabled(True)
-            self.progress.setVisible(False)
-
-            total_chunks = sum(len(c) for c in self.chunks.values())
-
-            if self.chunks:
-                f = list(self.chunks.keys())[0]
-                self._show_chunks(Path(f).name, self.chunks[f])
-
-            self._show_stats_with_chunks(self.extracted_texts, self.chunks, total_chunks)
-            self.statusBar().showMessage(f"Создано {total_chunks} чанков, сущности извлечены")
-
-            self._build_index()
+        def done(payload):
+            chunks, status_suffix, warning = payload
+            self.chunks = chunks
+            self._finish_preprocessing(status_suffix)
+            if warning:
+                QMessageBox.warning(
+                    self,
+                    "GLiNER недоступен",
+                    "GLiNER упал в отдельном процессе, приложение продолжит без сущностей.\n\n"
+                    f"{warning}"
+                )
 
         def err(e):
             self.btn_preprocess.setEnabled(True)
@@ -376,46 +414,104 @@ class TestWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", str(e))
 
         self.worker = WorkerThread(
-            self.preprocessor.process_documents, self.extracted_texts)
+            self._preprocess_documents,
+            self.extracted_texts,
+            self.chk_entities.isChecked(),
+            self.combo_entities_mode.currentData(),
+            self.entities_batch_size,
+        )
         self.worker.finished.connect(done)
         self.worker.error.connect(err)
         self.worker.start()
+
+    def _preprocess_documents(self, extracted_texts, extract_entities, mode, batch_size):
+        chunks = self.preprocessor.process_documents(extracted_texts)
+
+        if not extract_entities:
+            return chunks, "без извлечения сущностей", None
+
+        result = self.entity_service.extract(
+            chunks,
+            mode=mode,
+            batch_size=batch_size,
+        )
+        return result.chunks, result.status_suffix, result.warning
+
+    def _finish_preprocessing(self, status_suffix):
+        self.btn_preprocess.setEnabled(True)
+        self.progress.setVisible(False)
+        self.index = None
+        self.index_builder = None
+        self.index_ready = False
+        self.searcher = None
+        self.index_dirty = True
+        self.btn_search.setEnabled(False)
+        self.btn_build_index.setEnabled(True)
+
+        total_chunks = sum(len(c) for c in self.chunks.values())
+
+        if self.chunks:
+            f = list(self.chunks.keys())[0]
+            self._show_chunks(Path(f).name, self.chunks[f])
+            self._show_entities(Path(f).name, self.chunks[f])
+
+        self._show_stats_with_chunks(self.extracted_texts, self.chunks, total_chunks)
+        self.statusBar().showMessage(
+            f"Создано {total_chunks} чанков, {status_suffix}. Индекс еще не построен"
+        )
 
     def _build_index(self):
         if not self.chunks:
             return
 
-        def done(index):
+        self.statusBar().showMessage("Построение индекса...")
+        self.progress.setVisible(True)
+        self.progress.setMaximum(0)
+        self.btn_build_index.setEnabled(False)
+        self.btn_search.setEnabled(False)
+        def done(payload):
+            index, index_builder = payload
             self.index = index
+            self.index_builder = index_builder
             self.index_ready = True
-            self.searcher = SemanticSearch(index, self.index_builder.vectorizer)
+            self.index_dirty = False
+            self.searcher = self.SemanticSearch(index, self.index_builder.vectorizer)
             self.btn_search.setEnabled(True)
+            self.btn_build_index.setEnabled(True)
+            self.progress.setVisible(False)
             self.statusBar().showMessage(f"Индекс: {index.size} векторов")
 
         def err(e):
+            self.btn_build_index.setEnabled(True)
+            self.progress.setVisible(False)
             QMessageBox.critical(self, "Ошибка индексации", str(e))
 
-        self.statusBar().showMessage("Построение индекса...")
-        self.index_builder = IndexBuilder(batch_size=32)
-        self.worker = WorkerThread(
-            self.index_builder.build_from_chunks, self.chunks)
+        self.worker = WorkerThread(self._build_index_thread, self.chunks)
         self.worker.finished.connect(done)
         self.worker.error.connect(err)
         self.worker.start()
 
+    def _build_index_thread(self, chunks):
+        index_builder = self.IndexBuilder(batch_size=32)
+        index = index_builder.build_from_chunks(chunks)
+        return index, index_builder
+
     def _do_search(self):
         if not self.index_ready or self.index is None:
-            QMessageBox.warning(self, "Внимание", "Сначала предобработайте документы!")
+            QMessageBox.warning(self, "Внимание", "Сначала постройте индекс!")
             return
         query = self.search_input.text().strip()
         if not query:
             return
         self.statusBar().showMessage(f"Поиск: {query}")
         self.btn_search.setEnabled(False)
+        self.btn_entities_from_search.setEnabled(False)
 
         def done(results):
+            self.last_search_results = results
             self._show_search_results(query, results)
             self.btn_search.setEnabled(True)
+            self.btn_entities_from_search.setEnabled(bool(results))
             self.statusBar().showMessage(f"Найдено: {len(results)}")
             self.tabs.setCurrentWidget(self.txt_search_results)
 
@@ -431,6 +527,68 @@ class TestWindow(QMainWindow):
 
     def _search_thread(self, query, top_k):
         return self.searcher.search(query, top_k=top_k)
+
+    def _extract_entities_from_search(self):
+        if not self.last_search_results:
+            QMessageBox.warning(self, "Внимание", "Сначала выполните поиск!")
+            return
+
+        chunks_for_entities = self.entity_service.chunks_from_search_results(
+            self.chunks,
+            self.last_search_results,
+        )
+        total = self.entity_service.count_chunks(chunks_for_entities)
+
+        if not chunks_for_entities:
+            QMessageBox.warning(self, "Внимание", "Не удалось сопоставить результаты поиска с чанками")
+            return
+
+        self.statusBar().showMessage("GLiNER по результатам поиска...")
+        self.progress.setVisible(True)
+        self.progress.setMaximum(0)
+        self.btn_entities_from_search.setEnabled(False)
+
+        def done(result):
+            self.chunks = result.chunks
+            if result.warning:
+                QMessageBox.warning(
+                    self,
+                    "GLiNER недоступен",
+                    "GLiNER упал в отдельном процессе, приложение продолжит работу.\n\n"
+                    f"{result.warning}"
+                )
+
+            current_index = self.file_selector.currentIndex()
+            if current_index >= 0:
+                current_file = self.file_selector.itemData(current_index)
+                if current_file in self.chunks:
+                    self._show_chunks(Path(current_file).name, self.chunks[current_file])
+                    self._show_entities(Path(current_file).name, self.chunks[current_file])
+
+            self.tabs.setCurrentWidget(self.txt_entities)
+            self.statusBar().showMessage(f"Сущности извлечены из результатов поиска: {total} чанков")
+            self.progress.setVisible(False)
+            self.btn_entities_from_search.setEnabled(True)
+
+        def err(e):
+            QMessageBox.warning(
+                self,
+                "GLiNER недоступен",
+                "GLiNER упал в отдельном процессе, приложение продолжит работу.\n\n"
+                f"{e}"
+            )
+            self.progress.setVisible(False)
+            self.btn_entities_from_search.setEnabled(True)
+
+        self.worker = WorkerThread(
+            self.entity_service.extract_from_search_results,
+            self.chunks,
+            self.last_search_results,
+            self.entities_batch_size,
+        )
+        self.worker.finished.connect(done)
+        self.worker.error.connect(err)
+        self.worker.start()
 
     def _show_raw_result(self, name, text):
         self.txt_result.setPlainText(text)
@@ -465,6 +623,114 @@ class TestWindow(QMainWindow):
             html += "</div>"
         self.txt_chunks.setHtml(html)
 
+    def _show_entities(self, name, chunks):
+        grouped = {}
+        total = 0
+
+        for chunk in chunks:
+            for entity in chunk.metadata.get("entities", []):
+                text = str(entity.get("text", "")).strip()
+                label = str(entity.get("label", "неизвестно")).strip() or "неизвестно"
+
+                if not text:
+                    continue
+
+                total += 1
+                grouped.setdefault(label, {})
+                item = grouped[label].setdefault(text, {
+                    "count": 0,
+                    "chunks": [],
+                    "scores": [],
+                    "sources": set(),
+                    "blocks": [],
+                })
+                item["count"] += 1
+
+                chunk_indexes = entity.get("chunk_indexes")
+                if isinstance(chunk_indexes, list) and chunk_indexes:
+                    item["chunks"].extend(int(i) + 1 for i in chunk_indexes)
+                else:
+                    item["chunks"].append(chunk.chunk_index + 1)
+
+                score = entity.get("score")
+                if score is not None:
+                    item["scores"].append(float(score))
+
+                source = entity.get("source")
+                if source:
+                    item["sources"].add(str(source))
+
+                if label in {"источник", "фрагмент программного кода"}:
+                    item["blocks"].append({
+                        "title": entity.get("title") or text.splitlines()[0],
+                        "body": entity.get("code") or text,
+                    })
+
+        if not total:
+            self.txt_entities.setHtml(
+                f"<b>🏷️ {html_module.escape(name)}</b><br><br>"
+                "Сущности не найдены. Включите чекбокс <b>GLiNER сущности</b> "
+                "перед предобработкой или проверьте параметры извлечения."
+            )
+            return
+
+        html = f"<b>🏷️ {html_module.escape(name)}</b> — {total} сущн.<br><br>"
+
+        for label in sorted(grouped.keys()):
+            entities = grouped[label]
+            label_total = sum(item["count"] for item in entities.values())
+
+            html += (
+                "<div style='margin-bottom:12px; padding:10px; "
+                "background:#1e1e2e; border-radius:6px;'>"
+            )
+            html += (
+                f"<b style='color:#a6e3a1;'>{html_module.escape(label)}</b> "
+                f"<span style='color:#cdd6f4;'>({label_total})</span><br><br>"
+            )
+
+            sorted_items = sorted(
+                entities.items(),
+                key=lambda pair: (-pair[1]["count"], pair[0].lower()),
+            )
+
+            for text, item in sorted_items:
+                chunks_text = ", ".join(str(i) for i in sorted(set(item["chunks"]))[:12])
+                if len(set(item["chunks"])) > 12:
+                    chunks_text += ", ..."
+
+                details = f"чанки: {chunks_text}"
+                if item["scores"]:
+                    avg_score = sum(item["scores"]) / len(item["scores"])
+                    details += f" | score: {avg_score:.2f}"
+
+                if item["sources"]:
+                    details += f" | {', '.join(sorted(item['sources']))}"
+
+                if label in {"источник", "фрагмент программного кода"} and item["blocks"]:
+                    block = item["blocks"][0]
+                    title = html_module.escape(str(block["title"]))
+                    body = html_module.escape(str(block["body"]))
+                    html += (
+                        f"• <b>{title}</b> "
+                        f"<span style='color:#888;'>x{item['count']}; "
+                        f"{html_module.escape(details)}</span>"
+                        "<pre style='white-space:pre-wrap; margin:6px 0 12px 18px; "
+                        "padding:8px; background:#252535; border-radius:6px; "
+                        "color:#cdd6f4; font-family:Menlo, monospace; font-size:11px;'>"
+                        f"{body}</pre>"
+                    )
+                else:
+                    html += (
+                        f"• <b>{html_module.escape(text)}</b> "
+                        f"<span style='color:#888;'>x{item['count']}; "
+                        f"{html_module.escape(details)}</span><br>"
+                    )
+
+            html += "</div>"
+
+        self.txt_entities.setHtml(html)
+
     def _show_search_results(self, query, results):
         if not results:
             self.txt_search_results.setHtml("<b>Ничего не найдено</b>")
@@ -496,6 +762,7 @@ class TestWindow(QMainWindow):
             self._show_raw_result(name, self.extracted_texts[fp])
         if fp in self.chunks:
             self._show_chunks(name, self.chunks[fp])
+            self._show_entities(name, self.chunks[fp])
 
     def _show_stats(self, results, total_chars, total_words):
         html = f"<b>📊 Извлечение текста</b><br><br>"
@@ -529,14 +796,19 @@ class TestWindow(QMainWindow):
         self.index_ready = False
         self.index_builder = None
         self.searcher = None
+        self.index_dirty = False
+        self.last_search_results = []
         self.file_list.clear()
         self.file_selector.clear()
         self.lbl_count.setText("Загружено: 0")
         self.btn_extract.setEnabled(False)
         self.btn_preprocess.setEnabled(False)
+        self.btn_build_index.setEnabled(False)
         self.btn_search.setEnabled(False)
+        self.btn_entities_from_search.setEnabled(False)
         self.txt_result.clear()
         self.txt_chunks.clear()
+        self.txt_entities.clear()
         self.txt_search_results.clear()
         self.txt_stats.clear()
         self.statusBar().showMessage("Очищено")

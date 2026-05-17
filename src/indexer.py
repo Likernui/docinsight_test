@@ -53,7 +53,10 @@ class Vectorizer:
     @property
     def embedding_dim(self):
         if self._embedding_dim is None:
-            self._embedding_dim = self.model.get_sentence_embedding_dimension()
+            if hasattr(self.model, "get_embedding_dimension"):
+                self._embedding_dim = self.model.get_embedding_dimension()
+            else:
+                self._embedding_dim = self.model.get_sentence_embedding_dimension()
         return self._embedding_dim
 
     def encode(self, texts: list[str], batch_size: int = 32, show_progress: bool = False) -> np.ndarray:

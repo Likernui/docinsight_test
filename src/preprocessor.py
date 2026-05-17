@@ -284,8 +284,7 @@ class StructuralChunker:
             
             # Если набрали достаточно — сохраняем чанк
             if current_len >= self.chunk_size:
-                chunk_text = '. '.join(current_sentences)
-                chunk_text = chunk_text.replace('. . ', '. ')  # cleanup
+                chunk_text = ' '.join(current_sentences)
                 
                 chunk_metadata = (metadata.copy() if metadata else {})
                 chunks.append(TextChunk(
@@ -306,8 +305,7 @@ class StructuralChunker:
         
         # Последний чанк
         if current_sentences:
-            chunk_text = '. '.join(current_sentences)
-            chunk_text = chunk_text.replace('. . ', '. ')
+            chunk_text = ' '.join(current_sentences)
             
             chunk_metadata = (metadata.copy() if metadata else {})
             chunks.append(TextChunk(
