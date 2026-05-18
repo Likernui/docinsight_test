@@ -242,7 +242,6 @@ class EntityService:
                     merged[file_path].append(enriched)
                 else:
                     chunk.metadata.setdefault("entities", [])
-                    chunk.metadata.setdefault("code_blocks", [])
                     merged[file_path].append(chunk)
 
         return merged
@@ -265,7 +264,6 @@ class EntityService:
             for index, chunk in enumerate(chunk_list):
                 if include_sources and source_section_start is not None and index >= source_section_start:
                     chunk.metadata.setdefault("entities", [])
-                    chunk.metadata["code_blocks"] = []
                     enriched[file_path].append(chunk)
                     continue
 
@@ -280,7 +278,6 @@ class EntityService:
                     extractor.deduplicate_entities(existing_entities + entities),
                     chunk.chunk_index,
                 )
-                chunk.metadata["code_blocks"] = extractor.extract_code_blocks(chunk.text)
                 enriched[file_path].append(chunk)
 
             if include_sources:

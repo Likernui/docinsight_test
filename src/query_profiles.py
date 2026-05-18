@@ -15,8 +15,6 @@ class QueryProfile:
     queries: tuple[str, ...]
     top_k: int = 8
     use_gliner: bool = True
-    use_regex: bool = True
-    prefer_bottom_chunks: bool = False
 
 
 QUERY_PROFILES: dict[str, QueryProfile] = {
@@ -90,7 +88,6 @@ QUERY_PROFILES: dict[str, QueryProfile] = {
         ),
         top_k=5,
         use_gliner=False,
-        prefer_bottom_chunks=True,
     ),
 }
 

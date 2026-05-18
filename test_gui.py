@@ -57,14 +57,11 @@ class TestWindow(QMainWindow):
         self.file_paths = []
         self.extracted_texts = {}
         self.preprocessor = TextPreprocessor()
-        self.entity_extractor = None
         self.chunks = {}
         self.index = None
         self.index_builder = None
         self.index_ready = False
         self.searcher = None
-        self.index_dirty = False
-        self.last_search_results = []
         self._init_ui()
         self._setup_styles()
 
@@ -194,11 +191,6 @@ class TestWindow(QMainWindow):
         self.btn_search.setEnabled(False)
         g2l.addWidget(self.btn_search)
 
-        self.btn_entities_from_search = QPushButton("🏷️ GLiNER по поиску")
-        self.btn_entities_from_search.setFixedHeight(44)
-        self.btn_entities_from_search.clicked.connect(self._extract_entities_from_search)
-        self.btn_entities_from_search.setEnabled(False)
-        g2l.addWidget(self.btn_entities_from_search)
         sb.addWidget(g2)
 
         self.btn_clear = QPushButton("🗑️ Очистить")
@@ -255,12 +247,6 @@ class TestWindow(QMainWindow):
         self.txt_search_results.setFont(QFont("Menlo", 10))
         self.txt_search_results.setPlaceholderText("Результаты поиска...")
         self.tabs.addTab(self.txt_search_results, "🔎 Поиск")
-
-        self.txt_stats = QTextEdit()
-        self.txt_stats.setReadOnly(True)
-        self.txt_stats.setFont(QFont("Menlo", 10))
-        self.txt_stats.setPlaceholderText("Статистика...")
-        self.tabs.addTab(self.txt_stats, "📊 Статистика")
 
         ml.addWidget(self.tabs)
         root.addWidget(main, 1)
@@ -368,8 +354,6 @@ class TestWindow(QMainWindow):
             self._update_file_list()
             self._update_file_selector()
             total = sum(len(t) for t in results.values())
-            words = sum(len(t.split()) for t in results.values())
-            self._show_stats(results, total, words)
             if results:
                 f = list(results.keys())[0]
                 self._show_raw_result(Path(f).name, results[f])
@@ -444,7 +428,6 @@ class TestWindow(QMainWindow):
         self.index_builder = None
         self.index_ready = False
         self.searcher = None
-        self.index_dirty = True
         self.btn_search.setEnabled(False)
         self.btn_build_index.setEnabled(True)
 
@@ -455,7 +438,6 @@ class TestWindow(QMainWindow):
             self._show_chunks(Path(f).name, self.chunks[f])
             self._show_entities(Path(f).name, self.chunks[f])
 
-        self._show_stats_with_chunks(self.extracted_texts, self.chunks, total_chunks)
         self.statusBar().showMessage(
             f"Создано {total_chunks} чанков, {status_suffix}. Индекс еще не построен"
         )
@@ -474,7 +456,6 @@ class TestWindow(QMainWindow):
             self.index = index
             self.index_builder = index_builder
             self.index_ready = True
-            self.index_dirty = False
             self.searcher = self.SemanticSearch(index, self.index_builder.vectorizer)
             self.btn_search.setEnabled(True)
             self.btn_build_index.setEnabled(True)
@@ -505,13 +486,10 @@ class TestWindow(QMainWindow):
             return
         self.statusBar().showMessage(f"Поиск: {query}")
         self.btn_search.setEnabled(False)
-        self.btn_entities_from_search.setEnabled(False)
 
         def done(results):
-            self.last_search_results = results
             self._show_search_results(query, results)
             self.btn_search.setEnabled(True)
-            self.btn_entities_from_search.setEnabled(bool(results))
             self.statusBar().showMessage(f"Найдено: {len(results)}")
             self.tabs.setCurrentWidget(self.txt_search_results)
 
@@ -527,68 +505,6 @@ class TestWindow(QMainWindow):
 
     def _search_thread(self, query, top_k):
         return self.searcher.search(query, top_k=top_k)
-
-    def _extract_entities_from_search(self):
-        if not self.last_search_results:
-            QMessageBox.warning(self, "Внимание", "Сначала выполните поиск!")
-            return
-
-        chunks_for_entities = self.entity_service.chunks_from_search_results(
-            self.chunks,
-            self.last_search_results,
-        )
-        total = self.entity_service.count_chunks(chunks_for_entities)
-
-        if not chunks_for_entities:
-            QMessageBox.warning(self, "Внимание", "Не удалось сопоставить результаты поиска с чанками")
-            return
-
-        self.statusBar().showMessage("GLiNER по результатам поиска...")
-        self.progress.setVisible(True)
-        self.progress.setMaximum(0)
-        self.btn_entities_from_search.setEnabled(False)
-
-        def done(result):
-            self.chunks = result.chunks
-            if result.warning:
-                QMessageBox.warning(
-                    self,
-                    "GLiNER недоступен",
-                    "GLiNER упал в отдельном процессе, приложение продолжит работу.\n\n"
-                    f"{result.warning}"
-                )
-
-            current_index = self.file_selector.currentIndex()
-            if current_index >= 0:
-                current_file = self.file_selector.itemData(current_index)
-                if current_file in self.chunks:
-                    self._show_chunks(Path(current_file).name, self.chunks[current_file])
-                    self._show_entities(Path(current_file).name, self.chunks[current_file])
-
-            self.tabs.setCurrentWidget(self.txt_entities)
-            self.statusBar().showMessage(f"Сущности извлечены из результатов поиска: {total} чанков")
-            self.progress.setVisible(False)
-            self.btn_entities_from_search.setEnabled(True)
-
-        def err(e):
-            QMessageBox.warning(
-                self,
-                "GLiNER недоступен",
-                "GLiNER упал в отдельном процессе, приложение продолжит работу.\n\n"
-                f"{e}"
-            )
-            self.progress.setVisible(False)
-            self.btn_entities_from_search.setEnabled(True)
-
-        self.worker = WorkerThread(
-            self.entity_service.extract_from_search_results,
-            self.chunks,
-            self.last_search_results,
-            self.entities_batch_size,
-        )
-        self.worker.finished.connect(done)
-        self.worker.error.connect(err)
-        self.worker.start()
 
     def _show_raw_result(self, name, text):
         self.txt_result.setPlainText(text)
@@ -764,30 +680,6 @@ class TestWindow(QMainWindow):
             self._show_chunks(name, self.chunks[fp])
             self._show_entities(name, self.chunks[fp])
 
-    def _show_stats(self, results, total_chars, total_words):
-        html = f"<b>📊 Извлечение текста</b><br><br>"
-        html += f"Файлов: {len(results)}<br>Символов: {total_chars}<br>Слов: {total_words}<br><br>"
-        for fp, text in results.items():
-            html += f"<b>📄 {Path(fp).name}</b><br>"
-            html += f"  Символов: {len(text)} | Слов: {len(text.split())} | Строк: {len(text.splitlines())}<br>"
-        self.txt_stats.setHtml(html)
-
-    def _show_stats_with_chunks(self, texts, chunks, total_chunks):
-        total_cc = sum(len(c.text) for cl in chunks.values() for c in cl)
-        avg = total_cc // total_chunks if total_chunks else 0
-        html = f"<b>📊 Извлечение + Предобработка</b><br><br>"
-        html += f"Файлов: {len(texts)}<br>Символов: {sum(len(t) for t in texts.values())}<br>"
-        html += f"Чанков: {total_chunks}<br>Средний размер: {avg} симв.<br><br>"
-        for fp in texts.keys():
-            name = Path(fp).name
-            nc = len(chunks.get(fp, []))
-            sizes = [len(c.text) for c in chunks.get(fp, [])]
-            mn = min(sizes) if sizes else 0
-            mx = max(sizes) if sizes else 0
-            html += f"<b>📄 {name}</b><br>"
-            html += f"  Чанков: {nc} | Мин: {mn} | Макс: {mx}<br>"
-        self.txt_stats.setHtml(html)
-
     def _clear(self):
         self.file_paths = []
         self.extracted_texts = {}
@@ -796,8 +688,6 @@ class TestWindow(QMainWindow):
         self.index_ready = False
         self.index_builder = None
         self.searcher = None
-        self.index_dirty = False
-        self.last_search_results = []
         self.file_list.clear()
         self.file_selector.clear()
         self.lbl_count.setText("Загружено: 0")
@@ -805,12 +695,10 @@ class TestWindow(QMainWindow):
         self.btn_preprocess.setEnabled(False)
         self.btn_build_index.setEnabled(False)
         self.btn_search.setEnabled(False)
-        self.btn_entities_from_search.setEnabled(False)
         self.txt_result.clear()
         self.txt_chunks.clear()
         self.txt_entities.clear()
         self.txt_search_results.clear()
-        self.txt_stats.clear()
         self.statusBar().showMessage("Очищено")
 
 

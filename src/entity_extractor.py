@@ -4,17 +4,7 @@
 """
 
 import re
-from dataclasses import dataclass
 from typing import Any
-
-
-@dataclass
-class ExtractedEntity:
-    text: str
-    label: str
-    score: float | None = None
-    start: int | None = None
-    end: int | None = None
 
 
 class EntityExtractor:
@@ -577,27 +567,6 @@ class EntityExtractor:
             "code": block.get("text"),
         }
 
-    def extract_from_text(self, text: str) -> dict[str, list[dict[str, Any]]]:
-        entities = self.extract_entities(text)
-        regex_entities = self.extract_regex_entities(text, bottom_section=True)
-
-        all_entities = entities + regex_entities
-        all_entities = self.deduplicate_entities(all_entities)
-        all_entities = self.normalize_entity_records(all_entities)
-
-        return {
-            "entities": all_entities,
-            "code_blocks": self.extract_code_blocks(text),
-        }
-    
-    def enrich_chunk(self, chunk):
-        result = self.extract_from_text(chunk.text)
-
-        chunk.metadata["entities"] = result["entities"]
-        chunk.metadata["code_blocks"] = result["code_blocks"]
-
-        return chunk
-    
     def enrich_chunks(self, chunks: list, batch_size: int = 8):
         """
         Извлечь сущности из списка чанков.
@@ -613,7 +582,6 @@ class EntityExtractor:
         for index, (chunk, entities) in enumerate(zip(chunks, gliner_entities)):
             if source_section_start is not None and index >= source_section_start:
                 chunk.metadata["entities"] = []
-                chunk.metadata["code_blocks"] = []
                 enriched.append(chunk)
                 continue
 
@@ -627,7 +595,6 @@ class EntityExtractor:
             all_entities = self.normalize_entity_records(all_entities, chunk.chunk_index)
 
             chunk.metadata["entities"] = all_entities
-            chunk.metadata["code_blocks"] = self.extract_code_blocks(chunk.text)
             enriched.append(chunk)
 
         self.attach_document_source_block(enriched)
@@ -778,53 +745,3 @@ class EntityExtractor:
             normalized.append(item)
 
         return normalized
-    
-    def extract_document_structure(self, chunks: list) -> dict:
-        """
-        Собирает структуру документа:
-        дисциплина -> темы -> студент, если найден рядом.
-        """
-        current_discipline = None
-        topics = []
-
-        for chunk in chunks:
-            entities = chunk.metadata.get("entities", [])
-
-            # 1. Обновляем текущую дисциплину
-            for ent in entities:
-                if ent.get("label") == "дисциплина":
-                    current_discipline = ent.get("text")
-
-            # 2. Ищем студентов в текущем чанке
-            students = [
-                ent.get("text")
-                for ent in entities
-                if ent.get("label") == "ФИО студента"
-            ]
-
-            # 3. Ищем темы
-            for ent in entities:
-                if ent.get("label") in ["тема проекта", "тема работы", "название проекта"]:
-                    topics.append({
-                        "topic": ent.get("text"),
-                        "discipline": current_discipline,
-                        "students": students,
-                        "chunk_index": chunk.chunk_index,
-                        "file_path": chunk.file_path,
-                    })
-
-        return {
-            "discipline": current_discipline,
-            "topics": topics,
-        }
-    
-    def extract_all_documents_structure(self, chunks_dict: dict[str, list]) -> dict:
-        """
-        Собирает структуру по всем документам.
-        """
-        result = {}
-
-        for file_path, chunks in chunks_dict.items():
-            result[file_path] = self.extract_document_structure(chunks)
-
-        return result

@@ -74,13 +74,6 @@ class DocumentPipeline:
         )
         chunks = preprocessor.process_documents(documents)
 
-        self._check_cancel(cancel_checker)
-        self._emit(progress_callback, "Извлечение структурных сущностей...")
-        chunks = self.entity_service.enrich_chunks_regex_only(
-            chunks,
-            include_sources=self._profile_enabled(profiles, "sources"),
-        )
-
         gliner_profiles = [profile for profile in profiles if profile.use_gliner]
         if gliner_profiles:
             try:
@@ -94,6 +87,8 @@ class DocumentPipeline:
             except Exception as exc:
                 warnings.append(str(exc))
 
+        self._check_cancel(cancel_checker)
+        self._emit(progress_callback, "Извлечение структурных сущностей...")
         chunks = self.entity_service.enrich_chunks_regex_only(
             chunks,
             include_sources=self._profile_enabled(profiles, "sources"),
