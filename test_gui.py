@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QFileDialog, QLabel, QProgressBar,
-    QMessageBox, QListWidget, QListWidgetItem, QTabWidget,
+    QMessageBox, QListWidget, QTabWidget,
     QComboBox, QSpinBox, QGroupBox, QLineEdit, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -42,13 +42,12 @@ class TestWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         from src.text_extractor import DocumentLoader
-        from src.preprocessor import TextPreprocessor, TextChunk
+        from src.preprocessor import TextPreprocessor
         from src.indexer import IndexBuilder
         from src.semantic_search import SemanticSearch
         from src.entity_service import EntityService
 
         self.TextPreprocessor = TextPreprocessor
-        self.TextChunk = TextChunk
         self.IndexBuilder = IndexBuilder
         self.SemanticSearch = SemanticSearch
         self.entity_service = EntityService(Path(__file__).parent)

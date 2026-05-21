@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,12 +26,14 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from src.pipeline import DocumentPipeline, PipelineCancelled, PipelineOptions
+from src.report_generator import DocxReportGenerator
 
 
 ENTITY_CHOICES = [
@@ -81,6 +83,7 @@ class MainWindow(QMainWindow):
         self.file_paths: list[str] = []
         self.rows: list[dict] = []
         self.worker: PipelineThread | None = None
+        self.report_generator = DocxReportGenerator()
 
         self.setWindowTitle("DocInsight")
         self.setMinimumSize(1180, 760)
@@ -132,6 +135,24 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._cancel)
         sidebar_layout.addWidget(self.btn_cancel)
+
+        report_group = QGroupBox("DOCX-отчет")
+        report_layout = QVBoxLayout(report_group)
+        report_layout.setSpacing(8)
+
+        self.report_all_radio = QRadioButton("Все файлы")
+        self.report_all_radio.setChecked(True)
+        report_layout.addWidget(self.report_all_radio)
+
+        self.report_current_radio = QRadioButton("Конкретный файл")
+        report_layout.addWidget(self.report_current_radio)
+
+        self.btn_report = QPushButton("Сгенерировать DOCX-отчет")
+        self.btn_report.setEnabled(False)
+        self.btn_report.clicked.connect(self._generate_report)
+        report_layout.addWidget(self.btn_report)
+
+        sidebar_layout.addWidget(report_group)
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
@@ -208,12 +229,20 @@ class MainWindow(QMainWindow):
             QScrollBar::handle:vertical { background: #3a4252; border-radius: 6px; min-height: 28px; }
             QProgressBar { border: 1px solid #303846; border-radius: 6px; background: #171b24; }
             QProgressBar::chunk { background: #63b3ed; border-radius: 6px; }
-            QCheckBox { spacing: 8px; color: #d8dee9; }
-            QCheckBox::indicator { width: 16px; height: 16px; }
-            QCheckBox::indicator:unchecked { border: 1px solid #596579; background: #11131a; border-radius: 3px; }
+            QCheckBox, QRadioButton { spacing: 8px; color: #d8dee9; }
+            QCheckBox::indicator, QRadioButton::indicator { width: 16px; height: 16px; }
+            QCheckBox::indicator:unchecked {
+                border: 1px solid #596579; background: #11131a; border-radius: 3px;
+            }
             QCheckBox::indicator:checked {
                 border: 1px solid #63b3ed; background: #63b3ed; border-radius: 3px;
                 image: url("__CHECKMARK_PATH__");
+            }
+            QRadioButton::indicator:unchecked {
+                border: 1px solid #596579; background: #11131a; border-radius: 8px;
+            }
+            QRadioButton::indicator:checked {
+                border: 4px solid #63b3ed; background: #11131a; border-radius: 8px;
             }
             QMessageBox { background: #171b24; }
             QMessageBox QLabel { color: #d8dee9; }
@@ -259,6 +288,7 @@ class MainWindow(QMainWindow):
         self.btn_process.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.btn_load.setEnabled(False)
+        self.btn_report.setEnabled(False)
         self.status_label.setText("Запуск обработки...")
 
         self.worker = PipelineThread(self.file_paths, requested_types)
@@ -277,6 +307,7 @@ class MainWindow(QMainWindow):
         self._refresh_document_filter()
         self._show_current_document_entities()
         self._reset_busy_state()
+        self.btn_report.setEnabled(bool(self.rows))
         self.status_label.setText(result.status)
 
         if result.warnings:
@@ -298,6 +329,54 @@ class MainWindow(QMainWindow):
         self.btn_process.setEnabled(bool(self.file_paths))
         self.btn_cancel.setEnabled(False)
         self.btn_load.setEnabled(True)
+
+    def _report_rows_and_scope(self) -> tuple[list[dict], str]:
+        if self.report_current_radio.isChecked():
+            document = self.document_filter.currentData()
+            if not document:
+                raise ValueError("Выберите конкретный файл в списке результатов.")
+            rows = [row for row in self.rows if row.get("document") == document]
+            return rows, str(document)
+
+        return self.rows, "Все документы"
+
+    def _generate_report(self) -> None:
+        if not self.rows:
+            QMessageBox.warning(self, "Нет данных", "Сначала обработайте документы.")
+            return
+
+        try:
+            rows, scope = self._report_rows_and_scope()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Не выбран файл", str(exc))
+            return
+
+        if not rows:
+            QMessageBox.warning(self, "Нет данных", "Для выбранной области нет найденных сущностей.")
+            return
+
+        default_name = "docinsight_report.docx"
+        if scope != "Все документы":
+            default_name = f"docinsight_report_{Path(scope).stem}.docx"
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить DOCX-отчет",
+            str(Path.home() / default_name),
+            "DOCX (*.docx)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".docx"):
+            output_path += ".docx"
+
+        try:
+            self.report_generator.generate(rows, output_path, scope=scope)
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка отчета", str(exc))
+            return
+
+        QMessageBox.information(self, "Отчет готов", f"Отчет сохранен:\n{output_path}")
 
     def _refresh_document_filter(self) -> None:
         current = self.document_filter.currentData()
@@ -332,7 +411,44 @@ class MainWindow(QMainWindow):
             )
             return
 
+        grouped = self._group_rows_for_view(rows)
+        total = sum(item["count"] for group in grouped.values() for item in group.values())
+        html = [
+            "<div style='color:#d8dee9; font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Arial;'>",
+            f"<h2 style='margin:0 0 4px 0; color:#f4f7fb;'>Найденные сущности</h2>",
+            self._summary_line(total, document),
+        ]
+
+        for label in sorted(grouped.keys()):
+            entities = grouped[label]
+            label_total = sum(item["count"] for item in entities.values())
+            html.append(
+                "<div style='margin:0 0 14px 0; padding:12px; "
+                "background:#1b202b; border:1px solid #303846; border-radius:8px;'>"
+                f"<div style='color:#7dd3fc; font-weight:700; font-size:15px; margin-bottom:10px;'>"
+                f"{html_module.escape(label)} <span style='color:#8e98aa; font-weight:500;'>({label_total})</span>"
+                "</div>"
+            )
+
+            sorted_items = sorted(
+                entities.items(),
+                key=lambda pair: (-pair[1]["count"], pair[0].lower()),
+            )
+
+            for value, item in sorted_items:
+                if label in {"источник", "фрагмент программного кода"} and item["blocks"]:
+                    html.append(self._render_block_entity(item))
+                else:
+                    html.append(self._render_inline_entity(value, item))
+
+            html.append("</div>")
+
+        html.append("</div>")
+        self.entities_view.setHtml("".join(html))
+
+    def _group_rows_for_view(self, rows: list[dict]) -> dict[str, dict[str, dict]]:
         grouped: dict[str, dict[str, dict]] = {}
+
         for row in rows:
             label = str(row.get("type") or "неизвестно")
             value = str(row.get("value") or "").strip()
@@ -370,62 +486,35 @@ class MainWindow(QMainWindow):
                     "body": metadata.get("code") or metadata.get("text") or value,
                 })
 
-        total = sum(item["count"] for group in grouped.values() for item in group.values())
-        html = [
-            "<div style='color:#d8dee9; font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Arial;'>",
-            f"<h2 style='margin:0 0 4px 0; color:#f4f7fb;'>Найденные сущности</h2>",
-            self._summary_line(total, document),
-        ]
+        return grouped
 
-        for label in sorted(grouped.keys()):
-            entities = grouped[label]
-            label_total = sum(item["count"] for item in entities.values())
-            html.append(
-                "<div style='margin:0 0 14px 0; padding:12px; "
-                "background:#1b202b; border:1px solid #303846; border-radius:8px;'>"
-                f"<div style='color:#7dd3fc; font-weight:700; font-size:15px; margin-bottom:10px;'>"
-                f"{html_module.escape(label)} <span style='color:#8e98aa; font-weight:500;'>({label_total})</span>"
-                "</div>"
-            )
+    def _render_block_entity(self, item: dict) -> str:
+        block = item["blocks"][0]
+        title = html_module.escape(str(block["title"]))
+        body = html_module.escape(str(block["body"]))
+        details = self._entity_details_text(item)
+        extra = ""
+        if item["source_count"] is not None:
+            extra = f" | источников: {html_module.escape(str(item['source_count']))}"
 
-            sorted_items = sorted(
-                entities.items(),
-                key=lambda pair: (-pair[1]["count"], pair[0].lower()),
-            )
+        return (
+            "<div style='margin:0 0 12px 0;'>"
+            f"<div style='font-weight:650; color:#eef2ff;'>{title}</div>"
+            f"<div style='color:#8e98aa; font-size:12px; margin:2px 0 6px 0;'>{details}{extra}</div>"
+            "<pre style='white-space:pre-wrap; margin:0; padding:10px; "
+            "background:#11131a; border:1px solid #2d3543; border-radius:6px; "
+            "color:#d8dee9; font-family:Menlo,Consolas,monospace; font-size:12px;'>"
+            f"{body}</pre>"
+            "</div>"
+        )
 
-            for value, item in sorted_items:
-                details = self._entity_details_text(item)
-
-                if label in {"источник", "фрагмент программного кода"} and item["blocks"]:
-                    block = item["blocks"][0]
-                    title = html_module.escape(str(block["title"]))
-                    body = html_module.escape(str(block["body"]))
-                    extra = ""
-                    if item["source_count"] is not None:
-                        extra = f" | источников: {html_module.escape(str(item['source_count']))}"
-
-                    html.append(
-                        "<div style='margin:0 0 12px 0;'>"
-                        f"<div style='font-weight:650; color:#eef2ff;'>{title}</div>"
-                        f"<div style='color:#8e98aa; font-size:12px; margin:2px 0 6px 0;'>{details}{extra}</div>"
-                        "<pre style='white-space:pre-wrap; margin:0; padding:10px; "
-                        "background:#11131a; border:1px solid #2d3543; border-radius:6px; "
-                        "color:#d8dee9; font-family:Menlo,Consolas,monospace; font-size:12px;'>"
-                        f"{body}</pre>"
-                        "</div>"
-                    )
-                else:
-                    html.append(
-                        "<div style='margin:0 0 8px 0;'>"
-                        f"<span style='color:#eef2ff; font-weight:650;'>{html_module.escape(value)}</span> "
-                        f"<span style='color:#8e98aa; font-size:12px;'>{details}</span>"
-                        "</div>"
-                    )
-
-            html.append("</div>")
-
-        html.append("</div>")
-        self.entities_view.setHtml("".join(html))
+    def _render_inline_entity(self, value: str, item: dict) -> str:
+        return (
+            "<div style='margin:0 0 8px 0;'>"
+            f"<span style='color:#eef2ff; font-weight:650;'>{html_module.escape(value)}</span> "
+            f"<span style='color:#8e98aa; font-size:12px;'>{self._entity_details_text(item)}</span>"
+            "</div>"
+        )
 
     def _summary_line(self, total: int, document: str | None) -> str:
         if document:
