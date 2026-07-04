@@ -418,7 +418,12 @@ class TestWindow(QMainWindow):
             mode=mode,
             batch_size=batch_size,
         )
-        return result.chunks, result.status_suffix, result.warning
+        enriched = self.entity_service.enrich_chunks_regex_only(
+            result.chunks,
+            include_sources=True,
+            source_texts=extracted_texts,
+        )
+        return enriched, result.status_suffix, result.warning
 
     def _finish_preprocessing(self, status_suffix):
         self.btn_preprocess.setEnabled(True)
@@ -579,6 +584,7 @@ class TestWindow(QMainWindow):
                     item["blocks"].append({
                         "title": entity.get("title") or text.splitlines()[0],
                         "body": entity.get("code") or text,
+                        "source_count": entity.get("source_count"),
                     })
 
         if not total:
@@ -623,7 +629,7 @@ class TestWindow(QMainWindow):
                     details += f" | {', '.join(sorted(item['sources']))}"
 
                 if label in {"источник", "фрагмент программного кода"} and item["blocks"]:
-                    block = item["blocks"][0]
+                    block = self._best_block(item["blocks"])
                     title = html_module.escape(str(block["title"]))
                     body = html_module.escape(str(block["body"]))
                     html += (
@@ -645,6 +651,15 @@ class TestWindow(QMainWindow):
             html += "</div>"
 
         self.txt_entities.setHtml(html)
+
+    def _best_block(self, blocks):
+        return max(
+            blocks,
+            key=lambda block: (
+                int(block.get("source_count") or 0),
+                len(str(block.get("body") or "")),
+            ),
+        )
 
     def _show_search_results(self, query, results):
         if not results:

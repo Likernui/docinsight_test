@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.entity_extractor import EntityExtractor
+from src.entity import EntityExtractor
 from src.preprocessor import TextChunk
 
 

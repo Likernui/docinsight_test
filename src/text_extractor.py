@@ -3,7 +3,6 @@
 """
 
 from pathlib import Path
-from typing import Optional
 from abc import ABC, abstractmethod
 
 
@@ -26,59 +25,64 @@ class DocxExtractor(TextExtractor):
 
     def extract(self, file_path: str) -> str:
         from docx import Document
+        from docx.oxml.table import CT_Tbl
+        from docx.oxml.text.paragraph import CT_P
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
 
         try:
             doc = Document(file_path)
             texts = []
 
-            # 1. Текст из параграфов основного содержимого
-            for para in doc.paragraphs:
-                if para.text.strip():
-                    texts.append(para.text)
+            # 1. Основное содержимое в реальном порядке Word: абзац, таблица, абзац...
+            for element in doc.element.body.iterchildren():
+                if isinstance(element, CT_P):
+                    para = Paragraph(element, doc)
+                    if para.text.strip():
+                        texts.append(para.text)
+                elif isinstance(element, CT_Tbl):
+                    texts.extend(self._table_texts(Table(element, doc)))
 
-            # 2. Текст из таблиц
-            for table in doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        if cell.text.strip():
-                            texts.append(cell.text)
-
-            # 3. Текст из колонтитулов (header/footer)
+            # 2. Текст из колонтитулов (header/footer)
             for section in doc.sections:
-                # Header
-                try:
-                    header = section.header
-                    if header:
-                        for para in header.paragraphs:
-                            if para.text.strip():
-                                texts.append(para.text)
-                except:
-                    pass
+                for part_name in ("header", "footer"):
+                    try:
+                        part = getattr(section, part_name)
+                        texts.extend(self._paragraph_texts(part.paragraphs))
+                    except Exception:
+                        pass
 
-                # Footer
-                try:
-                    footer = section.footer
-                    if footer:
-                        for para in footer.paragraphs:
-                            if para.text.strip():
-                                texts.append(para.text)
-                except:
-                    pass
-
-            # 4. Текст из сносок (footnotes)
+            # 3. Текст из сносок (footnotes)
             try:
-                if doc.footnotes:
-                    for footnote in doc.footnotes:
-                        for para in footnote.paragraphs:
-                            if para.text.strip():
-                                texts.append(para.text)
-            except:
+                for footnote in doc.footnotes:
+                    texts.extend(self._paragraph_texts(footnote.paragraphs))
+            except Exception:
                 pass
 
             return "\n".join(texts)
 
         except Exception as e:
             raise RuntimeError(f"Ошибка чтения DOCX файла {file_path}: {e}")
+
+    def _table_texts(self, table) -> list[str]:
+        texts = []
+
+        for row in table.rows:
+            cells = [
+                cell_text
+                for cell in row.cells
+                if (cell_text := self._clean_cell_text(cell.text))
+            ]
+            if cells:
+                texts.append(" | ".join(cells))
+
+        return texts
+
+    def _paragraph_texts(self, paragraphs) -> list[str]:
+        return [para.text for para in paragraphs if para.text.strip()]
+
+    def _clean_cell_text(self, text: str) -> str:
+        return " ".join(part.strip() for part in text.splitlines() if part.strip())
 
 
 class PdfExtractor(TextExtractor):

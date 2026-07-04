@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
 
         group = QGroupBox("Что извлечь")
         group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(10, 14, 10, 10)
         group_layout.setSpacing(8)
         self.checkboxes: dict[str, QCheckBox] = {}
         for key, label in ENTITY_CHOICES:
@@ -136,8 +137,13 @@ class MainWindow(QMainWindow):
         self.btn_cancel.clicked.connect(self._cancel)
         sidebar_layout.addWidget(self.btn_cancel)
 
+        self.btn_clear = QPushButton("Очистить")
+        self.btn_clear.clicked.connect(self._clear)
+        sidebar_layout.addWidget(self.btn_clear)
+
         report_group = QGroupBox("DOCX-отчет")
         report_layout = QVBoxLayout(report_group)
+        report_layout.setContentsMargins(10, 14, 10, 10)
         report_layout.setSpacing(8)
 
         self.report_all_radio = QRadioButton("Все файлы")
@@ -179,6 +185,7 @@ class MainWindow(QMainWindow):
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Документ:"))
         self.document_filter = QComboBox()
+        self.document_filter.setMinimumWidth(520)
         self.document_filter.addItem("Все документы", None)
         self.document_filter.currentIndexChanged.connect(self._show_current_document_entities)
         filter_row.addWidget(self.document_filter)
@@ -288,6 +295,7 @@ class MainWindow(QMainWindow):
         self.btn_process.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.btn_load.setEnabled(False)
+        self.btn_clear.setEnabled(False)
         self.btn_report.setEnabled(False)
         self.status_label.setText("Запуск обработки...")
 
@@ -329,6 +337,28 @@ class MainWindow(QMainWindow):
         self.btn_process.setEnabled(bool(self.file_paths))
         self.btn_cancel.setEnabled(False)
         self.btn_load.setEnabled(True)
+        self.btn_clear.setEnabled(True)
+
+    def _clear(self) -> None:
+        self.file_paths = []
+        self.rows = []
+        self.worker = None
+
+        self.file_list.clear()
+        self.entities_view.clear()
+        self.document_filter.blockSignals(True)
+        self.document_filter.clear()
+        self.document_filter.addItem("Все документы", None)
+        self.document_filter.blockSignals(False)
+
+        self.progress.setVisible(False)
+        self.btn_process.setEnabled(False)
+        self.btn_cancel.setEnabled(False)
+        self.btn_load.setEnabled(True)
+        self.btn_clear.setEnabled(True)
+        self.btn_report.setEnabled(False)
+        self.report_all_radio.setChecked(True)
+        self.status_label.setText("Очищено. Выберите документы для анализа")
 
     def _report_rows_and_scope(self) -> tuple[list[dict], str]:
         if self.report_current_radio.isChecked():
@@ -484,12 +514,13 @@ class MainWindow(QMainWindow):
                 item["blocks"].append({
                     "title": metadata.get("title") or value,
                     "body": metadata.get("code") or metadata.get("text") or value,
+                    "source_count": metadata.get("source_count"),
                 })
 
         return grouped
 
     def _render_block_entity(self, item: dict) -> str:
-        block = item["blocks"][0]
+        block = self._best_block(item["blocks"])
         title = html_module.escape(str(block["title"]))
         body = html_module.escape(str(block["body"]))
         details = self._entity_details_text(item)
@@ -506,6 +537,15 @@ class MainWindow(QMainWindow):
             "color:#d8dee9; font-family:Menlo,Consolas,monospace; font-size:12px;'>"
             f"{body}</pre>"
             "</div>"
+        )
+
+    def _best_block(self, blocks: list[dict]) -> dict:
+        return max(
+            blocks,
+            key=lambda block: (
+                int(block.get("source_count") or 0),
+                len(str(block.get("body") or "")),
+            ),
         )
 
     def _render_inline_entity(self, value: str, item: dict) -> str:

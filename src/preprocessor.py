@@ -2,14 +2,12 @@
 Модуль предобработки текста: очистка и разбиение на фрагменты (чанки).
 
 Особенности:
-- Структурное разбиение для DOCX (по заголовкам Heading 1/2/3)
 - Разбиение по предложениям с overlap из целых предложений
-- Для PDF/изображений — разбиение по предложениям с overlap
+- Для DOCX/PDF/изображений используется уже извлечённый текст
 """
 
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -62,6 +60,9 @@ class TextCleaner:
         """
         if not text or not text.strip():
             return ""
+
+        # Word often stores code indentation as non-breaking spaces.
+        text = text.replace('\u00a0', ' ')
         
         # Убираем переносы слов в конце строки
         text = cls._HYPHEN_BREAK.sub('', text)
@@ -69,9 +70,13 @@ class TextCleaner:
         # Схлопываем множественные переносы
         text = cls._MULTI_NEWLINES.sub('\n\n', text)
         
-        # Схлопываем множественные пробелы
+        # Схлопываем множественные пробелы, но сохраняем ведущие отступы.
+        # Они важны для программного кода внутри отчетов.
         lines = text.split('\n')
-        lines = [cls._MULTI_SPACES.sub(' ', line).strip() for line in lines]
+        lines = [
+            line.rstrip() if line[:1].isspace() else cls._MULTI_SPACES.sub(' ', line).strip()
+            for line in lines
+        ]
         text = '\n'.join(lines)
         
         return text.strip()
@@ -87,89 +92,27 @@ def split_sentences(text: str) -> list[str]:
     Returns:
         Список предложений
     """
-    # Делим по предложениям: точка/!/?, за которыми следует пробел или \n
-    sentences = re.split(r'(?<=[.!?])[\s\n]+', text)
-    return [s.strip() for s in sentences if s.strip()]
+    # Не режем нумерованные списки после "1. ", иначе источник превращается
+    # в отдельный маркер "1." и отдельный текст пункта.
+    marker = "\uE000"
+    protected = re.sub(
+        r"(?:(?<=^)|(?<=\s))(\d{1,2})\.\s+(?=[A-ZА-ЯЁ])",
+        rf"\1.{marker}",
+        text,
+    )
 
-
-class DocxSectionParser:
-    """
-    Структурный парсер DOCX текста.
-    Извлекает заголовки и разбивает текст на секции.
-    """
-    
-    @staticmethod
-    def parse_from_docx(file_path: str) -> list[dict]:
-        """
-        Парсить DOCX файл в секции.
-        
-        Returns:
-            Список [{"heading": str, "text": str}, ...]
-            Первый элемент может быть {"heading": None, "text": "..."} — введение без заголовка
-        """
-        from docx import Document
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
-        from docx.oxml.ns import qn
-        
-        try:
-            doc = Document(file_path)
-        except Exception as e:
-            raise RuntimeError(f"Ошибка чтения DOCX: {e}")
-        
-        sections = []
-        current_section = {"heading": None, "text": ""}
-        
-        # Собираем все параграфы с их стилями
-        paragraphs_data = []
-        for para in doc.paragraphs:
-            style_name = para.style.name if para.style else ""
-            text = para.text.strip()
-            if not text:
-                continue
-            
-            # Определяем является ли параграф заголовком
-            is_heading = any([
-                'Heading' in style_name,
-                'Заголовок' in style_name,
-                # Эвристика: жирный текст без точки в конце
-                para.runs and para.runs[0].bold and len(text) < 100 and not text.endswith('.'),
-                # Эвристика: центрированный текст без точки
-                para.alignment == WD_ALIGN_PARAGRAPH.CENTER and len(text) < 100 and not text.endswith('.'),
-            ])
-            
-            paragraphs_data.append({
-                "text": text,
-                "is_heading": is_heading,
-                "style": style_name,
-            })
-        
-        # Собираем секции
-        for p in paragraphs_data:
-            if p["is_heading"]:
-                # Сохраняем текущую секцию
-                if current_section["text"].strip():
-                    sections.append(current_section)
-                # Новая секция
-                current_section = {"heading": p["text"], "text": ""}
-            else:
-                if current_section["text"]:
-                    current_section["text"] += '\n' + p["text"]
-                else:
-                    current_section["text"] = p["text"]
-        
-        # Последний параграф
-        if current_section["text"].strip():
-            sections.append(current_section)
-        
-        return sections
+    sentences = re.split(r'(?<=[.!?])[\s\n]+', protected)
+    return [
+        sentence.replace(marker, " ").strip()
+        for sentence in sentences
+        if sentence.strip()
+    ]
 
 
 class StructuralChunker:
     """
-    Разбиение текста на чанки со структурным и семантическим подходом.
+    Разбиение текста на чанки.
     
-    - Для DOCX: структурное разбиение по заголовкам
-    - Для PDF/изображений: разбиение по предложениям
     - Overlap = целые предложения, не обрезанные символы
     """
     
@@ -185,53 +128,6 @@ class StructuralChunker:
         """
         self.chunk_size = chunk_size
         self.overlap_sentences = overlap_sentences
-    
-    def chunk_from_docx(
-        self,
-        file_path: str
-    ) -> list[TextChunk]:
-        """
-        Структурное разбиение DOCX файла.
-        
-        1. Парсим секции по заголовкам
-        2. Внутри каждой секции делим на чанки по предложениям
-        3. Overlap = целые предложения между соседними чанками
-        
-        Returns:
-            Список TextChunk
-        """
-        # 1. Парсим секции
-        doc_sections = DocxSectionParser.parse_from_docx(file_path)
-        
-        all_chunks = []
-        
-        # 2. Обрабатываем каждую секцию
-        for section in doc_sections:
-            section_heading = section["heading"]
-            section_text = section["text"]
-            
-            if not section_text.strip():
-                continue
-            
-            # Добавляем заголовок к тексту секции если есть
-            if section_heading:
-                full_text = f"{section_heading}\n{section_text}"
-            else:
-                full_text = section_text
-            
-            # 3. Делим секцию на чанки по предложениям
-            section_chunks = self._chunk_sentences(
-                full_text, file_path, 
-                metadata={"section": section_heading or "Введение"}
-            )
-            
-            all_chunks.extend(section_chunks)
-        
-        # Перенумеруем чанки
-        for i, chunk in enumerate(all_chunks):
-            chunk.chunk_index = i
-        
-        return all_chunks
     
     def chunk_from_text(
         self,
@@ -320,10 +216,7 @@ class StructuralChunker:
 
 class TextPreprocessor:
     """
-    Полный пайплайн предобработки: очистка + структурное разбиение на чанки.
-    
-    Автоматически определяет DOCX файлы и применяет структурный анализ.
-    Для остальных файлов использует разбиение по предложениям.
+    Полный пайплайн предобработки: очистка + разбиение на чанки.
     """
     
     def __init__(
@@ -359,20 +252,11 @@ class TextPreprocessor:
         Returns:
             Список чанков
         """
-        # Очистка
         cleaned = self.cleaner.clean(text)
         if not cleaned:
             return []
         
-        # Определяем формат
-        #if file_path.lower().endswith('.docx'):
-            # Структурное разбиение DOCX
-            #return self.chunker.chunk_from_docx(file_path)
-        #else:
-            # Разбиение по предложениям
-            #return self.chunker.chunk_from_text(cleaned, file_path, metadata)
-        
-                # Для всех форматов используем уже извлечённый текст,
+        # Для всех форматов используем уже извлечённый текст,
         # потому что DocumentLoader уже достал и параграфы, и таблицы.
         return self.chunker.chunk_from_text(cleaned, file_path, metadata)
     

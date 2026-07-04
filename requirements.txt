@@ -16,6 +16,7 @@ faiss-cpu>=1.7.4
 transformers>=4.30.0
 torch>=2.0.0
 gliner>=0.2.0
+natasha>=1.6.0
 
 # Утилиты
 tqdm>=4.65.0

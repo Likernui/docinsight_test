@@ -92,6 +92,7 @@ class DocumentPipeline:
         chunks = self.entity_service.enrich_chunks_regex_only(
             chunks,
             include_sources=self._profile_enabled(profiles, "sources"),
+            source_texts=documents,
         )
 
         rows = self.entity_service.flatten_entities(chunks)

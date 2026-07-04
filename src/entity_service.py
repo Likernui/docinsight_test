@@ -250,28 +250,34 @@ class EntityService:
         self,
         chunks: dict[str, list[TextChunk]],
         include_sources: bool = True,
+        source_texts: dict[str, str] | None = None,
     ) -> dict[str, list[TextChunk]]:
-        from src.entity_extractor import EntityExtractor
+        from src.entity import EntityExtractor
 
         extractor = EntityExtractor(load_model=False)
         enriched = {}
 
         for file_path, chunk_list in chunks.items():
             enriched[file_path] = []
-            last_source_chunk_start = max(0, len(chunk_list) - 3)
             source_section_start = extractor.find_source_section_start(chunk_list)
 
             for index, chunk in enumerate(chunk_list):
+                if include_sources:
+                    chunk.metadata["entities"] = [
+                        entity
+                        for entity in chunk.metadata.get("entities", [])
+                        if entity.get("label") != "источник"
+                    ]
+
                 if include_sources and source_section_start is not None and index >= source_section_start:
                     chunk.metadata.setdefault("entities", [])
                     enriched[file_path].append(chunk)
                     continue
 
-                bottom_section = index >= last_source_chunk_start
                 entities = extractor.extract_regex_entities(
                     chunk.text,
-                    bottom_section=bottom_section,
-                    include_sources=include_sources and source_section_start is None,
+                    bottom_section=False,
+                    include_sources=False,
                 )
                 existing_entities = chunk.metadata.get("entities", [])
                 chunk.metadata["entities"] = extractor.normalize_entity_records(
@@ -280,8 +286,13 @@ class EntityService:
                 )
                 enriched[file_path].append(chunk)
 
+            extractor.attach_title_person_entities(enriched[file_path])
+
             if include_sources:
-                extractor.attach_document_source_block(enriched[file_path])
+                extractor.attach_document_source_block(
+                    enriched[file_path],
+                    document_text=(source_texts or {}).get(file_path),
+                )
 
         return enriched
 
@@ -311,14 +322,15 @@ class EntityService:
                     existing["metadata"]["chunk_indexes"] = existing["chunk_indexes"]
 
                     if row["confidence"] is not None:
-                        if existing["confidence"] is None:
-                            existing["confidence"] = row["confidence"]
-                        else:
-                            existing["confidence"] = max(existing["confidence"], row["confidence"])
+                        existing["confidence"] = (
+                            row["confidence"]
+                            if existing["confidence"] is None
+                            else max(existing["confidence"], row["confidence"])
+                        )
 
                     for name in ("source_count", "title", "code", "text"):
-                        if name in row["metadata"] and name not in existing["metadata"]:
-                            existing["metadata"][name] = row["metadata"][name]
+                        if name in row["metadata"]:
+                            existing["metadata"].setdefault(name, row["metadata"][name])
 
         return sorted(
             rows_by_key.values(),
@@ -365,14 +377,13 @@ class EntityService:
             "end": entity.get("end"),
         }
 
-        if title:
-            metadata["title"] = title
-        if code:
-            metadata["code"] = code
-        if text:
-            metadata["text"] = text
+        for name, value in (("title", title), ("code", code), ("text", text)):
+            if value:
+                metadata[name] = value
         if entity.get("source_count") is not None:
             metadata["source_count"] = entity.get("source_count")
+        if entity.get("from_title") is not None:
+            metadata["from_title"] = bool(entity.get("from_title"))
 
         score = entity.get("score")
         confidence = float(score) if score is not None else None

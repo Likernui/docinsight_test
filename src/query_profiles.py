@@ -20,7 +20,7 @@ class QueryProfile:
 QUERY_PROFILES: dict[str, QueryProfile] = {
     "students": QueryProfile(
         entity_type="students",
-        labels=("ФИО студента", "ФИО"),
+        labels=("ФИО студента",),
         queries=(
             "кто выполнил работу студенты авторы проекта",
             "выполнил студент группа авторы участники проекта",
@@ -30,7 +30,7 @@ QUERY_PROFILES: dict[str, QueryProfile] = {
     ),
     "supervisors": QueryProfile(
         entity_type="supervisors",
-        labels=("ФИО куратора", "ФИО"),
+        labels=("ФИО куратора",),
         queries=(
             "руководитель проекта научный руководитель преподаватель",
             "куратор преподаватель проверил работу",
@@ -90,10 +90,6 @@ QUERY_PROFILES: dict[str, QueryProfile] = {
         use_gliner=False,
     ),
 }
-
-
-def get_profile(entity_type: str) -> QueryProfile:
-    return QUERY_PROFILES[entity_type]
 
 
 def get_profiles(entity_types: list[str] | tuple[str, ...] | None = None) -> list[QueryProfile]:
